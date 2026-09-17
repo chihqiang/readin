@@ -2,6 +2,7 @@ package readin
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -43,16 +44,16 @@ func parseRange(s string) (*numericRange, error) {
 
 	parsed := &numericRange{MinInclude: left == '[', MaxInclude: right == ']'}
 	if bound := strings.TrimSpace(lower); bound != "" {
-		value, err := strconv.ParseFloat(bound, 64)
+		value, err := parseBound(bound, s)
 		if err != nil {
-			return nil, fmt.Errorf("range %q: %q is not a number", s, bound)
+			return nil, err
 		}
 		parsed.Min, parsed.MinSet = value, true
 	}
 	if bound := strings.TrimSpace(upper); bound != "" {
-		value, err := strconv.ParseFloat(bound, 64)
+		value, err := parseBound(bound, s)
 		if err != nil {
-			return nil, fmt.Errorf("range %q: %q is not a number", s, bound)
+			return nil, err
 		}
 		parsed.Max, parsed.MaxSet = value, true
 	}
@@ -61,6 +62,21 @@ func parseRange(s string) (*numericRange, error) {
 		return nil, fmt.Errorf("range %q: the upper bound is smaller than the lower bound", s)
 	}
 	return parsed, nil
+}
+
+// parseBound parses one bound of a range. strconv.ParseFloat accepts "NaN" and
+// "Inf", and a non finite bound must be refused rather than stored: every
+// comparison against NaN is false, so `range=[nan,10]` would silently accept
+// every value instead of rejecting the values it is meant to reject.
+func parseBound(bound, raw string) (float64, error) {
+	value, err := strconv.ParseFloat(bound, 64)
+	if err != nil {
+		return 0, fmt.Errorf("range %q: %q is not a number", raw, bound)
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("range %q: %q must be a finite number", raw, bound)
+	}
+	return value, nil
 }
 
 // contains reports whether n lies inside the range. A nil range contains

@@ -134,6 +134,74 @@ func TestReaderLoadUnsupportedFormat(t *testing.T) {
 	}
 }
 
+func TestReaderIgnoresAByteOrderMark(t *testing.T) {
+	// An editor may save a UTF-8 file with a byte order mark. YAML and TOML
+	// strip it themselves while JSON does not, so without the reader removing it
+	// the same document would load as YAML and fail as JSON, with an error about
+	// a character nothing in the file looks like.
+	bom := "\ufeff"
+
+	cases := map[string]string{
+		FormatJSON: `{"name": "readin", "port": 8080}`,
+		FormatYAML: "name: readin\nport: 8080\n",
+		FormatTOML: "name = \"readin\"\nport = 8080\n",
+	}
+	for format, content := range cases {
+		t.Run(format, func(t *testing.T) {
+			var cfg struct {
+				Name string `json:"name"`
+				Port int    `json:"port"`
+			}
+			if err := New().LoadBytes([]byte(bom+content), format, &cfg); err != nil {
+				t.Fatalf("LoadBytes: %v", err)
+			}
+			if cfg.Name != "readin" || cfg.Port != 8080 {
+				t.Fatalf("cfg = %+v", cfg)
+			}
+		})
+	}
+
+	t.Run("file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(bom+`{"name":"readin"}`), 0o600); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		var cfg struct {
+			Name string `json:"name"`
+		}
+		if err := New().LoadFile(path, &cfg); err != nil {
+			t.Fatalf("LoadFile: %v", err)
+		}
+		if cfg.Name != "readin" {
+			t.Fatalf("Name = %q", cfg.Name)
+		}
+	})
+
+	t.Run("mark only", func(t *testing.T) {
+		// A file holding nothing but a mark is an empty configuration, so the
+		// defaults apply rather than a parse failure.
+		var cfg struct {
+			Name string `json:"name,default=fallback"`
+		}
+		if err := New().LoadBytes([]byte(bom), FormatJSON, &cfg); err != nil {
+			t.Fatalf("LoadBytes: %v", err)
+		}
+		if cfg.Name != "fallback" {
+			t.Fatalf("Name = %q, want the default", cfg.Name)
+		}
+	})
+
+	t.Run("decode", func(t *testing.T) {
+		tree, err := New().Decode(NewString(bom+"name: readin\n", FormatYAML))
+		if err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		if tree["name"] != "readin" {
+			t.Fatalf("tree = %#v", tree)
+		}
+	})
+}
+
 func TestReaderDecode(t *testing.T) {
 	// Decode is the first half of Load: it returns the tree without involving a
 	// struct, which is what tooling needs to inspect a configuration.
@@ -248,6 +316,27 @@ func TestReaderMustLoadFile(t *testing.T) {
 		}
 	}()
 	New().MustLoadFile(filepath.Join(dir, "missing.yaml"), &cfg)
+}
+
+func TestReaderMustLoadBytes(t *testing.T) {
+	var cfg struct {
+		Name string `json:"name"`
+	}
+	New().MustLoadBytes([]byte("name: readin\n"), FormatYAML, &cfg)
+	if cfg.Name != "readin" {
+		t.Fatalf("Name = %q", cfg.Name)
+	}
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("MustLoadBytes did not panic")
+		}
+		if err, ok := recovered.(error); !ok || !errors.Is(err, ErrUnsupportedFormat) {
+			t.Fatalf("recovered %v, want the wrapped ErrUnsupportedFormat", recovered)
+		}
+	}()
+	New().MustLoadBytes([]byte("name = readin"), "ini", &cfg)
 }
 
 func TestReaderDecoderPrecedence(t *testing.T) {

@@ -474,6 +474,21 @@ func TestStructBinderOptionNilsAreIgnored(t *testing.T) {
 	}
 }
 
+func TestStructBinderZeroValueIsRefused(t *testing.T) {
+	// The zero value has no tag cache and no converter. Saying so is clearer
+	// than the nil dereference it would otherwise be.
+	var binder StructBinder
+	if err := binder.Bind(map[string]any{}, &binderConfig{}); !errors.Is(err, ErrNotInitialised) {
+		t.Fatalf("Bind error = %v, want ErrNotInitialised", err)
+	}
+
+	// It is also what a Reader injected with the zero value reports.
+	reader := New(WithBinder(&StructBinder{}))
+	if err := reader.Load(NewString("port: 1\n", FormatYAML), &binderConfig{}); !errors.Is(err, ErrNotInitialised) {
+		t.Fatalf("Load error = %v, want ErrNotInitialised", err)
+	}
+}
+
 func TestStructBinderTargetErrors(t *testing.T) {
 	binder := NewStructBinder()
 	tree := yamlTree(t, "port: 1\n")

@@ -269,7 +269,10 @@ func parseTag(raw string) (fieldTag, error) {
 		return tag, nil
 	}
 
-	segments := splitTagValue(raw, tagSegmentSeparator)
+	segments, err := splitTagValue(raw, tagSegmentSeparator)
+	if err != nil {
+		return fieldTag{}, fmt.Errorf("%w: %v", ErrInvalidTag, err)
+	}
 	tag.Name = segments[0]
 
 	seen := make(map[string]struct{}, len(segments))
@@ -326,8 +329,12 @@ func (t *fieldTag) setOption(name, value string, hasValue bool, raw string) erro
 	case optRequired:
 		return fmt.Errorf("%w: option %q takes no value in %q", ErrInvalidTag, optRequired, raw)
 	case optOptions:
-		options := make([]string, 0, 4)
-		for _, option := range splitTagValue(value, tagListSeparator) {
+		values, err := splitTagValue(value, tagListSeparator)
+		if err != nil {
+			return fmt.Errorf("%w: option %q: %v", ErrInvalidTag, optOptions, err)
+		}
+		options := make([]string, 0, len(values))
+		for _, option := range values {
 			if option = strings.TrimSpace(option); option != "" {
 				options = append(options, option)
 			}
@@ -426,14 +433,26 @@ func numericValue(value reflect.Value) (float64, bool) {
 // together. Escaping and quoting are resolved here, so the segments it returns
 // are ready to use.
 //
+// An unclosed bracket or an unbalanced quote is an error rather than something
+// to absorb. Both make the scanner treat every separator that follows as part of
+// the value, so this tag
+//
+//	`json:"path,default=/srv/[x,required"`
+//
+// would quietly mean "the default is /srv/[x,required" and lose the constraint,
+// which is exactly the kind of silent misconfiguration the tag parser exists to
+// prevent. Quoting the value is how a bracket or a quote is written literally;
+// the error says so.
+//
 // A backslash escape is of limited use in a real struct tag, because reflect
 // refuses to read such a tag at all; parseFieldTag explains that in full.
-func splitTagValue(raw string, sep rune) []string {
+func splitTagValue(raw string, sep rune) ([]string, error) {
 	var (
-		values  []string
-		current strings.Builder
-		quoted  bool
-		depth   int
+		values   []string
+		current  strings.Builder
+		quoted   bool
+		depth    int
+		unclosed rune
 	)
 
 	runes := []rune(raw)
@@ -449,6 +468,9 @@ func splitTagValue(raw string, sep rune) []string {
 		case quoted:
 			current.WriteRune(c)
 		case c == '[' || c == '(' || c == '{':
+			if depth == 0 {
+				unclosed = c
+			}
 			depth++
 			current.WriteRune(c)
 		case (c == ']' || c == ')' || c == '}') && depth > 0:
@@ -462,5 +484,14 @@ func splitTagValue(raw string, sep rune) []string {
 		}
 	}
 
-	return append(values, strings.TrimSpace(current.String()))
+	if quoted {
+		return nil, fmt.Errorf("unbalanced %s in %q: write the quote as %s to keep it literal",
+			`"`, raw, `\"`)
+	}
+	if depth > 0 {
+		return nil, fmt.Errorf("unclosed %q in %q: quote the value to keep a lone bracket literal, "+
+			"e.g. default=\\\"a%cb\\\"", unclosed, raw, unclosed)
+	}
+
+	return append(values, strings.TrimSpace(current.String())), nil
 }

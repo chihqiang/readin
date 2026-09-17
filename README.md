@@ -98,7 +98,8 @@ reader.Load(myOwnSource{}, &cfg)               // secret store, config centre
 reader.FillDefault(&cfg)                       // no file at all: defaults and env= only
 reader.Decode(readin.NewFile("config.yaml"))   // the config tree, no struct involved
 
-reader.MustLoadFile("config.yaml", &cfg)       // panics instead of returning an error
+reader.MustLoadFile("config.yaml", &cfg)           // panics instead of returning an error
+reader.MustLoadBytes(raw, readin.FormatYAML, &cfg) // the same, from embedded content
 ```
 
 Applications normally depend on `readin.Loader` rather than on `*Reader`, so a test can hand out
@@ -121,12 +122,30 @@ func (s *Service) Start() (*Config, error) {
 JSON, YAML (`.yaml` and `.yml`) and TOML are built in.
 
 Numbers keep their exact text (`json.Number`) instead of going through `float64`, so a large
-integer or an exact decimal survives the round trip. A TOML date or a YAML timestamp becomes an
-RFC 3339 string, so either can fill a `time.Time` field like any other value.
+integer or an exact decimal survives the round trip. A YAML timestamp becomes an RFC 3339 string
+and a TOML one keeps the offset it was written with, so either can fill a `time.Time` field like
+any other value. A TOML value written *without* an offset — a date, a time or a datetime, which
+TOML calls local — keeps its local form (`2024-01-02`, `10:30:00`, `2024-01-02T10:30:00`): TOML
+leaves the meaning of a local value to the implementation, and the parsing library would otherwise
+read it in the zone of whichever machine happens to load the file.
+
+A leading UTF-8 byte order mark is removed before the content reaches a decoder, so a file saved
+by an editor that writes one loads the same way in every format. JSON would otherwise refuse it,
+since RFC 8259 does not allow one.
 
 An empty file — empty, whitespace only, or comments only — is not an error: the defaults apply.
 The root of a document has to be an object; an array or a bare scalar is rejected with
 `ErrNotConfigObject`.
+
+A YAML file is read as one document: a second one behind a `---` separator is refused instead of
+being ignored, because `yaml.Unmarshal` would return the first document and silently drop the
+rest. Documents that hold nothing are skipped, so a `---` used as a separator or a template
+placeholder is still an empty configuration; yaml.v3 cannot tell such a document apart from one
+holding an explicit `null`, which is why a bare `null` also counts as absent.
+
+A duplicate key is an error in YAML and TOML. JSON is the exception: `encoding/json` keeps the
+last of two equal names, and readin does not walk the document a second time to look for them.
+Keys that only look alike are still caught, because that is the key matcher's job — see below.
 
 ## Struct tags
 
@@ -146,7 +165,7 @@ Skip  string `json:"-"`
 | `env` | `env=APP_DSN` | Read **before** the file and the default. Set but empty counts as unset. |
 | `required` | `required` | A missing value is an error wrapping `ErrMissingField`. |
 | `options` | `options=debug\|info\|warn` | Closed set of values for a string field. |
-| `range` | `range=[1,65535]` | Bounds for a numeric field: `[a,b]`, `(a,b)`, `[a,b)`, `[a,)`, `(,b]`. |
+| `range` | `range=[1,65535]` | Bounds for a numeric field: `[a,b]`, `(a,b)`, `[a,b)`, `[a,)`, `(,b]`. Both bounds have to be finite: `NaN` and `Inf` are refused rather than silently accepting every value. |
 | (skip) | `-` | The field is never filled, whatever the file says. |
 
 The tag name is the config key; without one the Go field name is used. Keys are matched ignoring
@@ -159,6 +178,15 @@ than a silent truncation, and so is a typo in an option name:
 Hosts string `json:"hosts,default=\"a,b\""` // the default is "a,b", also for a []string field
 Bad   string `json:"name,default=a,b"`      // error: unknown option "b"
 Port  int    `json:"port,requird"`          // error: unknown option "requird"
+```
+
+A bracket or a quote that is never closed is an error rather than something the rest of the tag is
+read into. Without that, every separator behind it would belong to the value and the options after
+it would silently become text:
+
+```go
+Path string `json:"path,default=/srv/[x"`          // error: unclosed '['
+Path string `json:"path,default=\"/srv/[x\",require"` // the way to write a lone bracket
 ```
 
 Quoting is also the only form that works for a backslash escape: `default=/var\,log` reads the
@@ -203,18 +231,21 @@ names: they are taken from the file verbatim and no key matching is applied to t
 | `bool` | bool, `true`/`false`, `yes`/`no`, `on`/`off`, `enabled`/`disabled`, `1`/`0` | the same |
 | `int*`, `uint*`, `float*` | number, numeric string; a bool becomes 1/0 for floats | the same |
 | `time.Duration` | `"5s"`, `"1m30s"`; a bare number counts nanoseconds | the same |
-| `time.Time` | RFC 3339, `2006-01-02 15:04:05`, `2006-01-02`, `15:04:05` | the same |
+| `time.Time` | RFC 3339, and the ISO 8601 forms without an offset (`2006-01-02T15:04:05`, `2006-01-02T15:04`), with an optional fraction, plus `2006-01-02 15:04:05`, `2006-01-02`, `15:04:05` | the same |
 | `[]T` | array | comma separated string: `a, b ,,c` → `a b c` |
 | `[N]T` | array of exactly N items | the same |
 | `map[string]T` | object | — |
-| `[]byte` | string, as written | the same |
+| `[]byte`, `[N]byte` | string, as written | the same; an array needs exactly N bytes |
 | `*T` | allocated when a value is present | the same |
 | `any` | the decoded value | the string |
 | struct | nested object | — |
 | `encoding.TextUnmarshaler` | string, through `UnmarshalText` | the same |
 
 Overflow, a fractional value for an integer, a negative value for an unsigned field and a value
-that cannot be parsed are all errors carrying the field path — never a silent truncation.
+that cannot be parsed are all errors carrying the field path — never a silent truncation. The
+bounds of the integer types are overflow too: `9223372036854775808` for an `int64` is an error
+rather than the value clamped to `MaxInt64`, which is what a `float64` comparison would have let
+through. A string or an `env=` value is held to the same rule.
 
 A type with its own textual form wins over the plain kind of its underlying type, which is how a
 custom scalar gets to parse its own syntax:
@@ -241,6 +272,14 @@ dsn: ${DB_USER}@${DB_HOST}
 level: ${LOG_LEVEL:-info}  # fallback when unset or empty
 literal: $$not_a_variable  # $$ is an escaped $
 price: $5.00               # a $ not followed by a letter is literal
+```
+
+A fallback is a value like any other, so it may hold references of its own, and they are resolved
+only when the fallback is what gets used:
+
+```yaml
+dsn: ${DSN:-${DB_USER}@${DB_HOST}}
+url: ${PUBLIC_URL:-http://${HOST}:${PORT}}
 ```
 
 Expansion happens after the file is parsed and before the struct is filled, so an environment
@@ -317,7 +356,7 @@ if err := reader.LoadFile("config.yaml", &cfg); err != nil {
 | `ErrUnsupportedFormat` | no decoder claims the format, or it cannot be told from the file name |
 | `ErrNotConfigObject` | the root of the document is not an object |
 | `ErrNilSource`, `ErrNilTarget`, `ErrTargetNotStruct` | the argument handed to `Load` is unusable |
-| `ErrNotInitialised` | the `Reader` was not built with `readin.New` |
+| `ErrNotInitialised` | a value was not built by its constructor: a zero `Reader` or `StructBinder` |
 | `ErrNilDecoder`, `ErrDuplicateDecoder` | a decoder cannot be registered |
 | `ErrEnvNotSet` | a strict expansion hit an unset variable without a fallback |
 
@@ -354,7 +393,7 @@ reader := readin.New(readin.WithDecoder(INIDecoder{}))
 // A matcher replaces the default one, so it has to keep doing what the default
 // did as well: match ignoring case and surrounding spaces.
 strip := func(key string) string {
-	return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(key), "app_")))
+    return strings.ToLower(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(key), "app_")))
 }
 reader = readin.New(readin.WithKeyMatcher(strip))
 ```
@@ -376,6 +415,36 @@ shows up recognisably in errors.
   those six shapes no matter which parser produced the document.
 - **Fail loudly.** A typo in a tag, an ambiguous key, a value that does not fit its field or a
   duplicate decoder is an error, never a silent fallback.
+
+## Editor diagnostics
+
+`gopls` also runs staticcheck's `SA5008`, which validates a `json` tag against the option words
+`encoding/json/v2` knows (`omitempty`, `omitzero`, `string`, …). readin's own options are not in
+that list, so the analyzer reports every field readin fills:
+
+```text
+invalid appearance of unknown `default` tag option
+malformed `json` tag: invalid character '=' at start of option (expecting Unicode letter or single quote)
+```
+
+`go build`, `go vet` and readin itself all accept these tags: the analyzer is reading them as
+`encoding/json` options. `SA5008` only inspects the `json` and `xml` tags, so it can be silenced
+for the workspace, for the files that declare configuration structs, or avoided altogether by
+reading a tag of your own:
+
+```jsonc
+// .vscode/settings.json
+{
+    "gopls": {
+        "analyses": { "SA5008": false }
+    }
+}
+```
+
+```go
+// Or give readin a tag that has nothing to do with encoding/json:
+reader := readin.New(readin.WithTagKey("conf"))
+```
 
 ## Quality checks
 

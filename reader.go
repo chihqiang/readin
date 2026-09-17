@@ -90,6 +90,9 @@ func (r *Reader) LoadBytes(content []byte, format string, target any) error {
 // Decode reads src and returns the config tree, with the expander applied but no
 // struct involved. It is the first half of Load, useful for tooling that
 // inspects or hashes a configuration.
+//
+// A leading byte order mark is removed from the content, so a file saved by an
+// editor that writes one loads the same way as any other; see stripBOM.
 func (r *Reader) Decode(src Source) (map[string]any, error) {
 	if err := r.ready(); err != nil {
 		return nil, err
@@ -102,6 +105,7 @@ func (r *Reader) Decode(src Source) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	content = stripBOM(content)
 
 	decoder, err := r.decoder(src.Format())
 	if err != nil {
@@ -153,6 +157,17 @@ func (r *Reader) MustLoad(src Source, target any) {
 // MustLoadFile behaves like LoadFile and panics on error.
 func (r *Reader) MustLoadFile(path string, target any) {
 	if err := r.LoadFile(path, target); err != nil {
+		panic(err)
+	}
+}
+
+// MustLoadBytes behaves like LoadBytes and panics on error. It is the
+// in-memory counterpart of MustLoadFile, for a configuration embedded in the
+// binary:
+//
+//	readin.New().MustLoadBytes(embedded, readin.FormatYAML, &cfg)
+func (r *Reader) MustLoadBytes(content []byte, format string, target any) {
+	if err := r.LoadBytes(content, format, target); err != nil {
 		panic(err)
 	}
 }

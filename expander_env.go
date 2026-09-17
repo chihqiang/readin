@@ -109,6 +109,12 @@ func (e *EnvExpander) expandValue(value any) (any, error) {
 //	${VAR:-fallback}   fallback when VAR is unset or empty
 //	$$                 a literal $
 //
+// A fallback may hold references of its own, which are resolved only when the
+// fallback is the value that gets used:
+//
+//	dsn: ${DSN:-${DB_USER}@${DB_HOST}}
+//	url: ${PUBLIC_URL:-http://${HOST}:${PORT}}
+//
 // A "$" that is not followed by a letter or an underscore is kept literally, so
 // "price: $5" and "prompt: $" need no escaping. A "$" that IS followed by a
 // letter always starts a variable, which means a literal dollar in front of a
@@ -153,7 +159,7 @@ func expandVariables(s string, lookup LookupFunc, strict bool) (string, error) {
 		}
 
 		if s[i+1] == '{' {
-			end := strings.IndexByte(s[i+2:], '}')
+			end := closingBrace(s[i+2:])
 			if end < 0 {
 				// Unterminated reference: keep the rest as written.
 				out.WriteString(s[i:])
@@ -186,6 +192,37 @@ func expandVariables(s string, lookup LookupFunc, strict bool) (string, error) {
 	return out.String(), nil
 }
 
+// closingBrace returns the index of the "}" that closes a "${" reference whose
+// body starts at the beginning of s, or -1 when the reference is never closed.
+//
+// It counts nested references, because a fallback may hold references of its own
+// and the closing brace of the outermost reference is then the last one:
+//
+//	${A:-${B}}                  the body is "A:-${B}"
+//	${PUBLIC_URL:-${HOST}:${P}}  ... and the fallback expands on its own
+//
+// Taking the first "}" instead would cut those in the middle and leave an
+// unexpanded reference in the result.
+func closingBrace(s string) int {
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '$' && i+1 < len(s) && s[i+1] == '$':
+			// "$$" is a literal dollar, never the start of a reference.
+			i++
+		case s[i] == '$' && i+1 < len(s) && s[i+1] == '{':
+			depth++
+			i++
+		case s[i] == '}':
+			if depth == 0 {
+				return i
+			}
+			depth--
+		}
+	}
+	return -1
+}
+
 // resolveVariable resolves the body of a reference: "NAME" or "NAME:-fallback".
 func resolveVariable(spec string, lookup LookupFunc, strict bool) (string, error) {
 	name, fallback, hasFallback := strings.Cut(spec, ":-")
@@ -196,7 +233,10 @@ func resolveVariable(spec string, lookup LookupFunc, strict bool) (string, error
 		return value, nil
 	}
 	if hasFallback {
-		return fallback, nil
+		// A fallback is a value like any other, so it may refer to variables of
+		// its own. It is only ever resolved when it is the value that gets used,
+		// so a missing variable below a set one is not an error.
+		return expandVariables(fallback, lookup, strict)
 	}
 	if strict {
 		return "", fmt.Errorf("%w: %s", ErrEnvNotSet, name)

@@ -35,6 +35,9 @@ type structBinder interface {
 // once per binder rather than once per field per bind. The cache only ever grows
 // towards the number of distinct tags in the program, and it is read without a
 // lock, which is what keeps concurrent loads free of contention.
+//
+// A StructBinder must be built with NewStructBinder; the zero value is not
+// usable.
 type StructBinder struct {
 	tagKey  string
 	matcher KeyMatcher
@@ -95,7 +98,15 @@ func NewStructBinder(opts ...BinderOption) *StructBinder {
 }
 
 // Bind implements Binder.
+//
+// A StructBinder has to be built with NewStructBinder: the zero value holds no
+// tag cache and no converter, which is reported as ErrNotInitialised rather than
+// failing with a nil dereference.
 func (b *StructBinder) Bind(tree map[string]any, target any) error {
+	if b.tags == nil {
+		return ErrNotInitialised
+	}
+
 	rv := reflect.ValueOf(target)
 	if !rv.IsValid() || rv.Kind() != reflect.Pointer || rv.IsNil() {
 		return fmt.Errorf("%w: got %T", ErrNilTarget, target)

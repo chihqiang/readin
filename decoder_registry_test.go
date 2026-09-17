@@ -75,6 +75,38 @@ func TestRegistryLookupUnknownFormat(t *testing.T) {
 	}
 }
 
+func TestRegistryZeroValueIsAnEmptyRegistry(t *testing.T) {
+	// The zero value has no decoder at all. That is an empty registry, not a
+	// reason to fail with a nil dereference.
+	registry := &DecoderRegistry{}
+
+	if got := registry.Formats(); got != nil {
+		t.Fatalf("Formats() = %v, want nothing registered", got)
+	}
+	_, err := registry.Lookup(FormatYAML)
+	if !errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("Lookup error = %v, want ErrUnsupportedFormat", err)
+	}
+	if !strings.Contains(err.Error(), "supported formats: none") {
+		t.Fatalf("error = %v, want it to say that no format is registered", err)
+	}
+
+	// It can be filled like any other registry.
+	if err := registry.Register(NewYAMLDecoder()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	decoder, err := registry.Lookup(".yml")
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if decoder.Format() != FormatYAML {
+		t.Fatalf("decoder = %q, want %q", decoder.Format(), FormatYAML)
+	}
+	if got := registry.Formats(); !reflect.DeepEqual(got, []string{FormatYAML}) {
+		t.Fatalf("Formats() = %v, want [%s]", got, FormatYAML)
+	}
+}
+
 func TestRegistryRegisterRejectsNilsAndDuplicates(t *testing.T) {
 	registry := NewRegistry()
 

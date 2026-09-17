@@ -46,7 +46,7 @@ func normalizeValue(value any) any {
 	case string, bool, json.Number:
 		return v
 	case time.Time:
-		return v.Format(time.RFC3339Nano)
+		return formatTime(v)
 	case time.Duration:
 		return v.String()
 	case map[string]any:
@@ -81,6 +81,17 @@ func normalizeValue(value any) any {
 		// readable rather than dropped.
 		return fmt.Sprintf("%v", value)
 	}
+}
+
+// formatTime renders a time.Time into the canonical tree.
+//
+// A time that was written without an offset keeps its local wall clock instead
+// of being given an offset: see localTimeLayouts.
+func formatTime(t time.Time) string {
+	if layout, ok := localTimeLayouts[t.Location().String()]; ok {
+		return t.Format(layout)
+	}
+	return t.Format(time.RFC3339Nano)
 }
 
 // emptyOrNilSlice keeps a nil slice nil in the canonical tree: a typed nil slice

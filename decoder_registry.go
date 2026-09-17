@@ -25,8 +25,9 @@ type Registry interface {
 // DecoderRegistry is the default Registry: a map from format name and file
 // extension to decoder.
 //
-// Build one with NewRegistry or NewDefaultRegistry; the zero value is not
-// usable. A DecoderRegistry is safe for concurrent use.
+// Build one with NewRegistry or NewDefaultRegistry, or start from the zero value
+// and fill it with Register, which makes it the same empty registry. A
+// DecoderRegistry is safe for concurrent use.
 //
 // # Why reads take no lock
 //
@@ -67,6 +68,16 @@ func NewDefaultRegistry() *DecoderRegistry {
 	return NewRegistry(NewJSONDecoder(), NewYAMLDecoder(), NewTOMLDecoder())
 }
 
+// snapshot returns the current immutable state. A registry that was never given
+// a decoder has none at all, which is an empty registry rather than a reason to
+// fail with a nil dereference: the zero value is usable.
+func (r *DecoderRegistry) snapshot() *registryState {
+	if state := r.state.Load(); state != nil {
+		return state
+	}
+	return &registryState{}
+}
+
 // Register adds a decoder. A format name or extension that is already taken
 // makes Register fail with ErrDuplicateDecoder rather than silently picking one
 // of the two decoders.
@@ -89,7 +100,7 @@ func (r *DecoderRegistry) Register(decoder Decoder) error {
 	r.writes.Lock()
 	defer r.writes.Unlock()
 
-	current := r.state.Load()
+	current := r.snapshot()
 
 	for _, key := range keys {
 		if existing, ok := current.decoders[key]; ok {
@@ -122,7 +133,7 @@ func (r *DecoderRegistry) Register(decoder Decoder) error {
 // Lookup implements Registry.
 func (r *DecoderRegistry) Lookup(format string) (Decoder, error) {
 	// The read path: one atomic load, then a map read on a map nobody writes.
-	state := r.state.Load()
+	state := r.snapshot()
 	key := normalizeFormat(format)
 
 	if decoder, ok := state.decoders[key]; ok {
@@ -130,16 +141,25 @@ func (r *DecoderRegistry) Lookup(format string) (Decoder, error) {
 	}
 	if key == "" {
 		return nil, fmt.Errorf("%w: cannot tell the format of the content, supported formats: %s",
-			ErrUnsupportedFormat, strings.Join(state.formats, ", "))
+			ErrUnsupportedFormat, supportedFormats(state.formats))
 	}
 	return nil, fmt.Errorf("%w: %q, supported formats: %s",
-		ErrUnsupportedFormat, format, strings.Join(state.formats, ", "))
+		ErrUnsupportedFormat, format, supportedFormats(state.formats))
+}
+
+// supportedFormats renders the registered format names for an error message. An
+// empty registry has none to name, which reads better than a dangling colon.
+func supportedFormats(formats []string) string {
+	if len(formats) == 0 {
+		return "none"
+	}
+	return strings.Join(formats, ", ")
 }
 
 // Formats implements Registry. The returned slice is a copy, so a caller that
 // sorts or trims it cannot disturb the registry.
 func (r *DecoderRegistry) Formats() []string {
-	return append([]string(nil), r.state.Load().formats...)
+	return append([]string(nil), r.snapshot().formats...)
 }
 
 // normalizeFormat lower-cases a format name and drops a leading dot, so "YAML",

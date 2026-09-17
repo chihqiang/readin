@@ -3,6 +3,7 @@ package readin
 import (
 	"encoding"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"reflect"
@@ -34,12 +35,19 @@ var (
 // timeLayouts are the layouts accepted for a time.Time field, tried in order. A
 // numeric time (a unix timestamp) is not accepted: use int64 for that and
 // convert with time.Unix, so that the unit is never guessed.
+//
+// RFC 3339 insists on an offset, so the ISO 8601 forms written without one are
+// listed separately: a TOML local datetime looks like that, and so does a hand
+// written "2026-09-17T10:00:00". A ".999999999" in a layout means the fractional
+// part is optional, which is why one entry covers both forms.
 var timeLayouts = []string{
-	time.RFC3339Nano,
-	time.RFC3339,
-	time.DateTime, // 2006-01-02 15:04:05
-	time.DateOnly, // 2006-01-02
-	time.TimeOnly, // 15:04:05
+	time.RFC3339Nano,                // 2026-09-17T10:00:00.5Z, 2026-09-17T10:00:00+08:00
+	time.RFC3339,                    // 2026-09-17T10:00:00Z, 2026-09-17T10:00:00+08:00
+	"2006-01-02T15:04:05.999999999", // ISO 8601 without an offset
+	"2006-01-02T15:04",              // ... to the minute, which TOML allows
+	"2006-01-02 15:04:05.999999999", // the same with a space, as TOML and logs write it
+	time.DateOnly,                   // 2006-01-02
+	time.TimeOnly,                   // 15:04:05
 }
 
 // assign assigns src to dst, converting as needed.
@@ -98,9 +106,8 @@ func (c *converter) assignString(dst reflect.Value, raw, path string) error {
 		}
 		return c.assignString(dst.Elem(), raw, path)
 	case reflect.Slice, reflect.Array:
-		if dst.Kind() == reflect.Slice && dst.Type().Elem().Kind() == reflect.Uint8 {
-			dst.SetBytes([]byte(raw))
-			return nil
+		if isByteSequence(dst.Type()) {
+			return c.assignBytes(dst, raw, path)
 		}
 		return c.assignItems(dst, splitList(raw), path)
 	case reflect.Struct:
@@ -108,6 +115,35 @@ func (c *converter) assignString(dst reflect.Value, raw, path string) error {
 	default:
 		return c.assignScalar(dst, raw, path)
 	}
+}
+
+// assignBytes fills a []byte or [N]byte field from a string, as it is written.
+//
+// An array has to receive exactly its length, so that a value that does not fit
+// is reported instead of being padded or truncated: a [32]byte key that silently
+// takes the first 32 bytes of what was configured is not a key any more.
+func (c *converter) assignBytes(dst reflect.Value, text, path string) error {
+	if dst.Kind() == reflect.Array {
+		if dst.Len() != len(text) {
+			return fieldError(path, fmt.Errorf("%w: %s needs exactly %d bytes, got %d",
+				ErrInvalidValue, dst.Type(), dst.Len(), len(text)))
+		}
+		// SetUint element by element rather than reflect.Copy: a named element
+		// type ([N]Byte) is not assignable from []byte, but it is settable.
+		for i := 0; i < dst.Len(); i++ {
+			dst.Index(i).SetUint(uint64(text[i]))
+		}
+		return nil
+	}
+	dst.SetBytes([]byte(text))
+	return nil
+}
+
+// isByteSequence reports whether a type is a []byte or a [N]byte field. Both are
+// filled from a string as it is written rather than from a list of numbers.
+func isByteSequence(typ reflect.Type) bool {
+	return (typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array) &&
+		typ.Elem().Kind() == reflect.Uint8
 }
 
 // assignPointer allocates the pointed to value when needed.
@@ -156,10 +192,9 @@ func (c *converter) assignStruct(dst reflect.Value, src any, path string) error 
 func (c *converter) assignSlice(dst reflect.Value, src any, path string) error {
 	items, ok := src.([]any)
 	if !ok {
-		if text, isText := src.(string); isText && dst.Kind() == reflect.Slice && dst.Type().Elem().Kind() == reflect.Uint8 {
-			// A []byte field is filled from a string as it is written.
-			dst.SetBytes([]byte(text))
-			return nil
+		if text, isText := src.(string); isText && isByteSequence(dst.Type()) {
+			// A []byte or [N]byte field is filled from a string as it is written.
+			return c.assignBytes(dst, text, path)
 		}
 		return invalidValue(src, dst.Type(), path)
 	}
@@ -430,11 +465,19 @@ func toBool(src any) (bool, error) {
 }
 
 // toInt64 converts a decoded value into an int64.
+//
+// A whole number that ParseInt reports as out of range is an error rather than a
+// trip through float64: float64(MaxInt64) rounds up to 2^63, so the boundary
+// value would compare as "not too large" and the field would silently receive a
+// clamped (and on some architectures undefined) value.
 func toInt64(src any) (int64, error) {
 	switch v := src.(type) {
 	case json.Number:
-		if number, err := v.Int64(); err == nil {
+		text := v.String()
+		if number, err := strconv.ParseInt(text, 10, 64); err == nil {
 			return number, nil
+		} else if errors.Is(err, strconv.ErrRange) {
+			return 0, overflowValue(src, "an integer")
 		}
 		number, err := v.Float64()
 		if err != nil {
@@ -445,6 +488,8 @@ func toInt64(src any) (int64, error) {
 		text := strings.TrimSpace(v)
 		if number, err := strconv.ParseInt(text, 10, 64); err == nil {
 			return number, nil
+		} else if errors.Is(err, strconv.ErrRange) {
+			return 0, overflowValue(src, "an integer")
 		}
 		number, err := strconv.ParseFloat(text, 64)
 		if err != nil {
@@ -461,6 +506,7 @@ func toInt64(src any) (int64, error) {
 		if unsigned := rv.Uint(); unsigned <= math.MaxInt64 {
 			return int64(unsigned), nil
 		}
+		return 0, overflowValue(src, "an integer")
 	case reflect.Float32, reflect.Float64:
 		return floatToInt64(rv.Float(), src)
 	}
@@ -471,11 +517,14 @@ func toInt64(src any) (int64, error) {
 func toUint64(src any) (uint64, error) {
 	switch v := src.(type) {
 	case json.Number:
-		if number, err := v.Int64(); err == nil {
-			if number < 0 {
-				return 0, negativeValue(src)
-			}
-			return uint64(number), nil
+		text := v.String()
+		if number, err := strconv.ParseUint(text, 10, 64); err == nil {
+			return number, nil
+		} else if errors.Is(err, strconv.ErrRange) {
+			return 0, overflowValue(src, "an unsigned integer")
+		}
+		if strings.HasPrefix(text, "-") {
+			return 0, negativeValue(src)
 		}
 		number, err := v.Float64()
 		if err != nil {
@@ -486,6 +535,8 @@ func toUint64(src any) (uint64, error) {
 		text := strings.TrimSpace(v)
 		if number, err := strconv.ParseUint(text, 10, 64); err == nil {
 			return number, nil
+		} else if errors.Is(err, strconv.ErrRange) {
+			return 0, overflowValue(src, "an unsigned integer")
 		}
 		if strings.HasPrefix(text, "-") {
 			return 0, negativeValue(src)
@@ -572,23 +623,29 @@ func toDuration(src any) (time.Duration, error) {
 }
 
 // floatToInt64 converts a float that has no fractional part.
+//
+// The upper bound is compared with >= because float64 cannot hold MaxInt64: it
+// rounds to 2^63, which is the first value the conversion cannot represent. A
+// value that high is refused instead of being silently clamped by the hardware.
 func floatToInt64(value float64, src any) (int64, error) {
 	if value != math.Trunc(value) {
 		return 0, fmt.Errorf("%w: %v has a fractional part", ErrInvalidValue, src)
 	}
-	if value < math.MinInt64 || value > math.MaxInt64 {
-		return 0, fmt.Errorf("%w: %v does not fit in an integer", ErrInvalidValue, src)
+	if value >= math.MaxInt64 || value < math.MinInt64 {
+		return 0, overflowValue(src, "an integer")
 	}
 	return int64(value), nil
 }
 
-// floatToUint64 converts a float that has no fractional part.
+// floatToUint64 converts a float that has no fractional part. Its upper bound is
+// compared with >= for the same reason as floatToInt64: float64(MaxUint64)
+// rounds to 2^64.
 func floatToUint64(value float64, src any) (uint64, error) {
 	if value != math.Trunc(value) {
 		return 0, fmt.Errorf("%w: %v has a fractional part", ErrInvalidValue, src)
 	}
-	if value < 0 || value > math.MaxUint64 {
-		return 0, fmt.Errorf("%w: %v does not fit in an unsigned integer", ErrInvalidValue, src)
+	if value < 0 || value >= math.MaxUint64 {
+		return 0, overflowValue(src, "an unsigned integer")
 	}
 	return uint64(value), nil
 }
@@ -601,4 +658,11 @@ func notANumber(src any) error {
 // negativeValue reports a negative value that an unsigned field cannot hold.
 func negativeValue(src any) error {
 	return fmt.Errorf("%w: %v is negative and the field is unsigned", ErrInvalidValue, src)
+}
+
+// overflowValue reports a whole number that is too large for the field it is
+// being read into. It is never a silent truncation or a platform dependent
+// saturation.
+func overflowValue(src any, typ string) error {
+	return fmt.Errorf("%w: %v does not fit in %s", ErrInvalidValue, src, typ)
 }

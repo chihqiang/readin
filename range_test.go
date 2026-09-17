@@ -43,6 +43,10 @@ func TestParseRangeInvalid(t *testing.T) {
 		"half a number":        "[1,2x]",
 		"separated by a space": "[1 2]",
 		"three bounds":         "[1,2,3]",
+		"nan lower bound":      "[nan,10]",
+		"nan upper bound":      "[0,NaN]",
+		"infinite upper bound": "[0,Inf]",
+		"negative infinite":    "[-inf,0]",
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -50,6 +54,15 @@ func TestParseRangeInvalid(t *testing.T) {
 				t.Fatalf("parseRange(%q) = nil error, want a failure", raw)
 			}
 		})
+	}
+}
+
+func TestParseRangeRefusesNonFiniteBounds(t *testing.T) {
+	// A NaN bound would make every comparison false, so the range would accept
+	// anything at all instead of constraining the field.
+	_, err := parseRange("[nan,10]")
+	if err == nil || !strings.Contains(err.Error(), "finite") {
+		t.Fatalf("error = %v, want it to ask for a finite bound", err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -364,6 +365,79 @@ func TestConverterSlice(t *testing.T) {
 	}
 }
 
+func TestConverterByteArrays(t *testing.T) {
+	converter := testConverter()
+
+	// A fixed size byte array is filled from a string when the length matches,
+	// the way a []byte is: a [32]byte key is not a list of numbers.
+	fixed := newTarget([3]byte{})
+	if err := converter.assign(fixed, "abc", "key"); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if got := fixed.Interface().([3]byte); got != [3]byte{'a', 'b', 'c'} {
+		t.Fatalf("key = %q, want abc", got)
+	}
+
+	// A string of the wrong length is refused rather than padded or truncated.
+	for _, text := range []string{"ab", "abcd"} {
+		err := converter.assign(newTarget([3]byte{}), text, "key")
+		if !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("assign(%q) error = %v, want ErrInvalidValue", text, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "exactly 3 bytes") {
+			t.Errorf("error = %v, want it to name the length", err)
+		}
+	}
+
+	// An array with a named element type is filled as well: reflect.Copy would
+	// refuse it, because a named byte is not assignable from a plain one.
+	if !isByteSequence(reflect.TypeOf([3]namedByte{})) {
+		t.Fatal("a named byte array should read as a byte sequence")
+	}
+	named := newTarget([3]namedByte{})
+	if err := converter.assign(named, "abc", "key"); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if got := named.Interface().([3]namedByte); got != [3]namedByte{'a', 'b', 'c'} {
+		t.Fatalf("key = %q, want abc", got)
+	}
+
+	// A list of numbers still fills both shapes.
+	fromList := newTarget([3]byte{})
+	if err := converter.assign(fromList, []any{json.Number("1"), json.Number("2"), json.Number("3")}, "key"); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if got := fromList.Interface().([3]byte); got != [3]byte{1, 2, 3} {
+		t.Fatalf("key = %v, want [1 2 3]", got)
+	}
+
+	// And a string still fills a []byte.
+	slice := newTarget([]byte{})
+	if err := converter.assign(slice, "abc", "key"); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if string(slice.Bytes()) != "abc" {
+		t.Fatalf("key = %q", slice.Bytes())
+	}
+}
+
+func TestIsByteSequence(t *testing.T) {
+	byteSequences := []any{[]byte{}, [3]byte{}, []namedByte{}, [3]namedByte{}, []uint8{}}
+	for _, value := range byteSequences {
+		if !isByteSequence(reflect.TypeOf(value)) {
+			t.Errorf("isByteSequence(%T) = false, want true", value)
+		}
+	}
+
+	others := []any{[]int{}, [3]int{}, "text", map[string]string{}, 0}
+	for _, value := range others {
+		if isByteSequence(reflect.TypeOf(value)) {
+			t.Errorf("isByteSequence(%T) = true, want false", value)
+		}
+	}
+}
+
 func TestConverterMap(t *testing.T) {
 	converter := testConverter()
 
@@ -489,6 +563,35 @@ func TestConverterParseTime(t *testing.T) {
 	}
 	if got, err := parseTime("2026-09-17"); err != nil || got.Day() != 17 {
 		t.Fatalf("parseTime = (%v, %v)", got, err)
+	}
+}
+
+func TestParseTimeLayouts(t *testing.T) {
+	// RFC 3339 insists on an offset, so the ISO 8601 forms without one need
+	// layouts of their own. A TOML local datetime is written that way, and so is
+	// a hand written "2026-09-17T10:00:00".
+	cases := map[string]time.Time{
+		"2026-09-17T10:00:00Z":      time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC),
+		"2026-09-17T10:00:00+08:00": time.Date(2026, 9, 17, 10, 0, 0, 0, time.FixedZone("", 8*3600)),
+		"2026-09-17T10:00:00.5Z":    time.Date(2026, 9, 17, 10, 0, 0, 500000000, time.UTC),
+		"2026-09-17T10:00:00":       time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC),
+		"2026-09-17T10:00:00.25":    time.Date(2026, 9, 17, 10, 0, 0, 250000000, time.UTC),
+		"2026-09-17T10:00":          time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC),
+		"2026-09-17 10:00:00":       time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC),
+		"2026-09-17 10:00:00.25":    time.Date(2026, 9, 17, 10, 0, 0, 250000000, time.UTC),
+		"2026-09-17":                time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC),
+		"10:00:00":                  time.Date(0, 1, 1, 10, 0, 0, 0, time.UTC),
+	}
+
+	for text, want := range cases {
+		got, err := parseTime(text)
+		if err != nil {
+			t.Errorf("parseTime(%q): %v", text, err)
+			continue
+		}
+		if !got.Equal(want) {
+			t.Errorf("parseTime(%q) = %v, want %v", text, got, want)
+		}
 	}
 }
 
@@ -659,6 +762,70 @@ func TestToUint64(t *testing.T) {
 	}
 }
 
+// TestToInt64RefusesValuesThatDoNotFit pins the values around the int64 bounds:
+// float64(MaxInt64) rounds up to 2^63, so a float64 comparison would let the
+// boundary values through and the conversion would then saturate (or, on some
+// architectures, be undefined).
+func TestToInt64RefusesValuesThatDoNotFit(t *testing.T) {
+	for _, src := range []any{
+		json.Number("9223372036854775808"),  // 2^63
+		json.Number("-9223372036854775809"), // -(2^63 + 1)
+		"9223372036854775808",
+		"-9223372036854775809",
+		uint64(math.MaxUint64),
+		math.Ldexp(1, 63),
+	} {
+		_, err := toInt64(src)
+		if !errors.Is(err, ErrInvalidValue) || !strings.Contains(err.Error(), "does not fit") {
+			t.Errorf("toInt64(%v) error = %v, want it to refuse the value as out of range", src, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		src  any
+		want int64
+	}{
+		{json.Number("9223372036854775807"), math.MaxInt64},
+		{json.Number("-9223372036854775808"), math.MinInt64},
+		{"9223372036854775807", math.MaxInt64},
+		{math.MaxInt64, math.MaxInt64},
+		{uint64(math.MaxInt64), math.MaxInt64},
+	} {
+		got, err := toInt64(tc.src)
+		if err != nil {
+			t.Errorf("toInt64(%v): %v", tc.src, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("toInt64(%v) = %d, want %d", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestToUint64RefusesValuesThatDoNotFit pins the values around the uint64 bound,
+// for the same reason as TestToInt64RefusesValuesThatDoNotFit.
+func TestToUint64RefusesValuesThatDoNotFit(t *testing.T) {
+	for _, src := range []any{
+		json.Number("18446744073709551616"), // 2^64
+		"18446744073709551616",
+		json.Number("-99999999999999999999"),
+		math.Ldexp(1, 64),
+	} {
+		_, err := toUint64(src)
+		if !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("toUint64(%v) error = %v, want ErrInvalidValue", src, err)
+		}
+	}
+
+	got, err := toUint64(json.Number("18446744073709551615"))
+	if err != nil {
+		t.Fatalf("toUint64(MaxUint64): %v", err)
+	}
+	if got != math.MaxUint64 {
+		t.Errorf("toUint64(MaxUint64) = %d, want %d", got, uint64(math.MaxUint64))
+	}
+}
+
 func TestToFloat64(t *testing.T) {
 	cases := map[any]float64{
 		json.Number("1.5"): 1.5,
@@ -720,6 +887,14 @@ func TestFloatToIntegerHelpers(t *testing.T) {
 	if _, err := floatToInt64(1e30, "1e30"); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("error = %v, want ErrInvalidValue for an out of range value", err)
 	}
+	// The two bounds themselves: float64(MaxInt64) is 2^63, which an int64
+	// cannot hold, while float64(MinInt64) is exactly -2^63, which it can.
+	if _, err := floatToInt64(math.MaxInt64, "max"); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue at the upper bound", err)
+	}
+	if got, err := floatToInt64(math.MinInt64, "min"); err != nil || got != math.MinInt64 {
+		t.Fatalf("floatToInt64(MinInt64) = (%d, %v), want it accepted", got, err)
+	}
 
 	if got, err := floatToUint64(2.0, "2"); err != nil || got != 2 {
 		t.Fatalf("floatToUint64 = (%d, %v)", got, err)
@@ -729,6 +904,19 @@ func TestFloatToIntegerHelpers(t *testing.T) {
 	}
 	if _, err := floatToUint64(2.5, "2.5"); !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("error = %v, want ErrInvalidValue for a fractional value", err)
+	}
+	if _, err := floatToUint64(math.MaxUint64, "max"); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue at the upper bound", err)
+	}
+}
+
+func TestOverflowValue(t *testing.T) {
+	err := overflowValue(json.Number("1e30"), "an integer")
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue", err)
+	}
+	if !strings.Contains(err.Error(), "does not fit in an integer") {
+		t.Fatalf("error = %v, want it to name the target type", err)
 	}
 }
 
@@ -750,6 +938,7 @@ type (
 	namedFloat  float64
 	namedBool   bool
 	namedString string
+	namedByte   byte
 )
 
 // unmarshalerStruct is a struct with its own textual form, which is the other

@@ -109,6 +109,7 @@ func TestYAMLDecoderEmptyDocuments(t *testing.T) {
 		"marker":       "---\n",
 		"nullDocument": "null\n",
 		"tilde":        "~\n",
+		"twoMarkers":   "---\n---\n",
 	}
 	for name, content := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -120,6 +121,46 @@ func TestYAMLDecoderEmptyDocuments(t *testing.T) {
 				t.Fatalf("tree = %#v, want an empty non-nil tree so defaults apply", tree)
 			}
 		})
+	}
+}
+
+func TestYAMLDecoderIgnoresEmptyDocumentsAroundTheConfig(t *testing.T) {
+	// An empty document is not content: a "---" used as a separator or a
+	// template placeholder must not read as a second configuration.
+	for name, tc := range map[string]struct {
+		content string
+		want    map[string]any
+	}{
+		"trailing marker": {"name: a\n---\n", map[string]any{"name": "a"}},
+		"leading markers": {"---\n---\nname: a\n", map[string]any{"name": "a"}},
+		"explicit null":   {"name: a\n---\nnull\n", map[string]any{"name": "a"}},
+		"before content":  {"null\n---\nname: a\n", map[string]any{"name": "a"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree, err := NewYAMLDecoder().Decode([]byte(tc.content))
+			if err != nil {
+				t.Fatalf("Decode(%q): %v", tc.content, err)
+			}
+			if !reflect.DeepEqual(tree, tc.want) {
+				t.Fatalf("tree = %#v, want %#v", tree, tc.want)
+			}
+		})
+	}
+}
+
+func TestYAMLDecoderRefusesASecondDocument(t *testing.T) {
+	// yaml.Unmarshal would return the first document and drop the second one,
+	// so a concatenated file would silently lose a section.
+	_, err := NewYAMLDecoder().Decode([]byte("name: a\n---\nname: b\n"))
+	if err == nil || !strings.Contains(err.Error(), "after the config document") {
+		t.Fatalf("error = %v, want it to refuse the second document", err)
+	}
+}
+
+func TestYAMLDecoderReportsABrokenSecondDocument(t *testing.T) {
+	_, err := NewYAMLDecoder().Decode([]byte("name: a\n---\nb: [1, 2\n"))
+	if err == nil || !strings.Contains(err.Error(), "parse yaml") {
+		t.Fatalf("error = %v, want the parse failure of the second document", err)
 	}
 }
 

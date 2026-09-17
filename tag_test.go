@@ -672,17 +672,89 @@ func TestSplitTagValue(t *testing.T) {
 		{`"a|b"|c`, '|', []string{"a|b", "c"}},
 	}
 	for _, c := range cases {
-		if got := splitTagValue(c.raw, c.sep); !reflect.DeepEqual(got, c.want) {
+		got, err := splitTagValue(c.raw, c.sep)
+		if err != nil {
+			t.Errorf("splitTagValue(%q, %q): %v", c.raw, c.sep, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("splitTagValue(%q, %q) = %q, want %q", c.raw, c.sep, got, c.want)
 		}
 	}
 }
 
-func TestSplitTagValueUnbalancedBrackets(t *testing.T) {
-	// An unbalanced bracket keeps the separator inside the value; the tag parser
-	// reports it later as a broken range or default rather than splitting it.
-	got := splitTagValue("port,range=[1,2", ',')
-	if want := []string{"port", "range=[1,2"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("splitTagValue = %q, want %q", got, want)
+func TestSplitTagValueRefusesUnbalancedInput(t *testing.T) {
+	// An unclosed bracket or an unbalanced quote makes every separator after it
+	// part of the value, which would quietly turn the options that follow into
+	// text. It is an error with a way out instead.
+	for name, c := range map[string]struct {
+		raw     string
+		sep     rune
+		message string
+	}{
+		"unclosed bracket": {"port,default=a[b,required", ',', "unclosed '['"},
+		"unclosed paren":   {"port,default=a(b,required", ',', "unclosed '('"},
+		"unclosed brace":   {"port,default=a{b,required", ',', "unclosed '{'"},
+		"unbalanced quote": {`port,default="a,required`, ',', "unbalanced \""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := splitTagValue(c.raw, c.sep)
+			if err == nil {
+				t.Fatalf("splitTagValue(%q) = nil error, want a failure", c.raw)
+			}
+			if !strings.Contains(err.Error(), c.message) {
+				t.Fatalf("error = %v, want it to mention %s", err, c.message)
+			}
+			if !strings.Contains(err.Error(), "quote") {
+				t.Fatalf("error = %v, want it to say how to write the value literally", err)
+			}
+		})
+	}
+}
+
+func TestParseTagRefusesUnbalancedInput(t *testing.T) {
+	// The value that follows an unclosed bracket is swallowed by the previous
+	// option, so `required` would disappear from a tag like this one.
+	for name, raw := range map[string]string{
+		"required after an unclosed bracket": `path,default=/srv/[x,required`,
+		"required after an unclosed brace":   `path,default=a{b,required`,
+		"options list":                       `level,options=debug|info[`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := parseTag(raw)
+			if !errors.Is(err, ErrInvalidTag) {
+				t.Fatalf("parseTag(%q) error = %v, want ErrInvalidTag", raw, err)
+			}
+		})
+	}
+
+	// Quoting the bracket is the way to write it, and it keeps the option after
+	// it alive. The value is written the way reflect hands it over, i.e. with
+	// real quotes: `json:"path,default=\"a[b\",required"` in a struct tag.
+	tag, err := parseTag("path,default=\"a[b\",required")
+	if err != nil {
+		t.Fatalf("parseTag: %v", err)
+	}
+	if tag.Default != "a[b" || !tag.Required {
+		t.Fatalf("tag = %+v, want the default \"a[b\" and required set", tag)
+	}
+}
+
+func TestSetOptionRefusesAValueItCannotScan(t *testing.T) {
+	// setOption is handed an option value that the tag scanner has already read,
+	// and a value that is unbalanced inside the tag as a whole cannot get past
+	// parseTag to reach it. It refuses one anyway: this is where an option value
+	// becomes a parsed value, and accepting a value that cannot be scanned would
+	// mean quietly keeping half of it.
+	var tag fieldTag
+	err := tag.setOption(optOptions, "debug|info[", true, `level,options=debug|info[`)
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("error = %v, want ErrInvalidTag", err)
+	}
+	if !strings.Contains(err.Error(), optOptions) {
+		t.Fatalf("error = %v, want it to name the option", err)
+	}
+	if tag.Options != nil {
+		t.Fatalf("Options = %v, want the tag left untouched", tag.Options)
 	}
 }

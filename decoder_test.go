@@ -43,6 +43,37 @@ func TestEmptyTree(t *testing.T) {
 	}
 }
 
+func TestStripBOM(t *testing.T) {
+	bom := utf8BOM
+
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"without", []byte("a: 1"), "a: 1"},
+		{"with", append(append([]byte{}, bom...), "a: 1"...), "a: 1"},
+		{"bom only", bom, ""},
+		// A byte order mark is only a mark at the very start: one that happens
+		// to appear afterwards is content and stays.
+		{"in the middle", []byte("a: \xef\xbb\xbf1"), "a: \xef\xbb\xbf1"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := string(stripBOM(c.data)); got != c.want {
+				t.Fatalf("stripBOM(%q) = %q, want %q", c.data, got, c.want)
+			}
+		})
+	}
+
+	// The result shares the input, so stripping must not modify it.
+	content := append(append([]byte{}, bom...), "a: 1"...)
+	_ = stripBOM(content)
+	if string(content) != string(bom)+"a: 1" {
+		t.Fatalf("stripBOM modified its input: %q", content)
+	}
+}
+
 func TestIsBlank(t *testing.T) {
 	blank := [][]byte{
 		nil,
@@ -62,6 +93,7 @@ func TestIsBlank(t *testing.T) {
 		[]byte(" 0 "),
 		[]byte("# comment"),
 		[]byte("{}"),
+		utf8BOM, // a mark on its own is not content, but isBlank only sees bytes
 	}
 	for _, data := range contentful {
 		if isBlank(data) {

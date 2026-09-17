@@ -1,7 +1,10 @@
 package readin
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,17 +22,44 @@ func (d *YAMLDecoder) Format() string { return FormatYAML }
 func (d *YAMLDecoder) Extensions() []string { return []string{".yaml", ".yml"} }
 
 // Decode implements Decoder.
+//
+// A multi document file is refused rather than half read: yaml.Unmarshal would
+// return the first document and silently drop the rest, so a file that was
+// concatenated with another one would look like a configuration that lost a
+// section. Documents that hold nothing are skipped instead, so a "---" marker
+// used as a separator or a template placeholder is still a valid empty config;
+// yaml.v3 cannot tell such a document apart from one holding an explicit
+// "null", which is why a bare "null" also counts as absent.
 func (d *YAMLDecoder) Decode(data []byte) (map[string]any, error) {
 	if isBlank(data) {
 		return emptyTree(), nil
 	}
 
-	var raw any
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("readin: parse yaml: %w", err)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var (
+		raw   any
+		found bool
+	)
+	for {
+		var document any
+		err := decoder.Decode(&document)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("readin: parse yaml: %w", err)
+		}
+		if document == nil {
+			// An empty document ("---", "null", "~"): another one may follow.
+			continue
+		}
+		if found {
+			return nil, fmt.Errorf("readin: parse yaml: unexpected content after the config document")
+		}
+		raw, found = document, true
 	}
-	if raw == nil {
-		// A document holding only comments or only "---".
+
+	if !found {
 		return emptyTree(), nil
 	}
 

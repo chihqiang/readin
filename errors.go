@@ -19,8 +19,9 @@ var (
 	// ErrTargetNotStruct reports that the bind target does not point to a struct.
 	ErrTargetNotStruct = errors.New("readin: target must point to a struct")
 
-	// ErrNotInitialised reports a Reader that was not built with New.
-	ErrNotInitialised = errors.New("readin: reader is not initialised, use readin.New")
+	// ErrNotInitialised reports a value that was not built by its constructor:
+	// a zero Reader (use New) or a zero StructBinder (use NewStructBinder).
+	ErrNotInitialised = errors.New("readin: not initialised, use the New constructor of the type")
 
 	// ErrUnsupportedFormat reports that no decoder is registered for a format.
 	ErrUnsupportedFormat = errors.New("readin: unsupported config format")

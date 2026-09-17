@@ -33,7 +33,18 @@ func TestExpandVariablesSyntax(t *testing.T) {
 		"${EMPTY:-fallback}":    "fallback",
 		"${APP_NAME:-fallback}": "readin",
 		"${MISSING:-}":          "", "${}": "", // an empty reference expands to nothing
-		"${:-fallback}": "", // ... and has no name to look up		"${MISSING:-${APP_NAME}}": "${APP_NAME}", // no nested expansion, deliberately
+		"${:-fallback}": "", // ... and has no name to look up
+
+		// A fallback is a value like any other, so it may refer to variables.
+		"${MISSING:-${APP_NAME}}":      "readin",
+		"${MISSING:-$APP_NAME}":        "readin",
+		"${MISSING:-${A}${B}}":         "ab",
+		"${EMPTY:-${APP_NAME}}":        "readin",
+		"${MISSING:-${MISSING:-${A}}}": "a",
+		"${APP_NAME:-${MISSING}}":      "readin",
+		"${MISSING:-$$APP_NAME}":       "$APP_NAME",
+		"${MISSING:-x{i}}":             "x{i}", // braces that are not a reference
+		"${UNCLOSED:-${A}":             "${UNCLOSED:-${A}",
 
 		// Escaping and literals.
 		"$$APP_NAME":     "$APP_NAME",
@@ -54,6 +65,53 @@ func TestExpandVariablesSyntax(t *testing.T) {
 		if got != want {
 			t.Errorf("expandVariables(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestExpandVariablesNestedFallback(t *testing.T) {
+	lookup := envLookup(map[string]string{
+		"HOST": "10.0.0.5",
+		"PORT": "8080",
+		"A":    "a",
+	})
+
+	cases := map[string]string{
+		// The shape that a fallback is usually written in: a whole value built
+		// from references, of which only the outer one may be set.
+		"${PUBLIC_URL:-http://${HOST}:${PORT}}": "http://10.0.0.5:8080",
+		"${PUBLIC_URL:-http://${HOST}}":         "http://10.0.0.5",
+		// The brace that closes the outer reference is the last one, not the
+		// first one: cutting at the first would leave "${PORT}" in the result.
+		"${MISSING:-${A}${A}}":       "aa",
+		"${MISSING:-${MISSING:-$A}}": "a",
+	}
+
+	for input, want := range cases {
+		got, err := expandVariables(input, lookup, false)
+		if err != nil {
+			t.Fatalf("expandVariables(%q): %v", input, err)
+		}
+		if got != want {
+			t.Errorf("expandVariables(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestExpandVariablesNestedFallbackIsOnlyResolvedWhenUsed(t *testing.T) {
+	// A fallback that is never used is never looked at, so a variable that is
+	// only named there cannot fail a strict expansion.
+	lookup := envLookup(map[string]string{"SET": "value"})
+
+	got, err := expandVariables("${SET:-${NOT_SET}}", lookup, true)
+	if err != nil {
+		t.Fatalf("expandVariables: %v", err)
+	}
+	if got != "value" {
+		t.Fatalf("got %q, want the set variable to win", got)
+	}
+
+	if _, err := expandVariables("${NOT_SET:-${ALSO_NOT_SET}}", lookup, true); !errors.Is(err, ErrEnvNotSet) {
+		t.Fatalf("error = %v, want ErrEnvNotSet from the fallback", err)
 	}
 }
 
