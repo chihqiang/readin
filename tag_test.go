@@ -21,8 +21,14 @@ func cacheField(tag string) reflect.StructField {
 	return reflect.StructField{Name: "Port", Type: reflect.TypeOf(0), Tag: reflect.StructTag(tag)}
 }
 
+// testTagCache returns a cache with the built-in options and none of the
+// application defined ones, which is the setup of every test that is about the
+// cache itself rather than about tag options (those are in TestTagOptions* and in
+// the binder tests, which go through a real binder).
+func testTagCache() *tagCache { return newTagCache(nil) }
+
 func TestTagCacheParsesOncePerTag(t *testing.T) {
-	cache := newTagCache()
+	cache := testTagCache()
 	field := cacheField(`json:"port,required,default=8080"`)
 
 	first, err := cache.lookup(field, "json")
@@ -50,7 +56,7 @@ func TestTagCacheParsesOncePerTag(t *testing.T) {
 }
 
 func TestTagCacheKeysOnTagAndTagKey(t *testing.T) {
-	cache := newTagCache()
+	cache := testTagCache()
 
 	// A different tag is a different entry.
 	if _, err := cache.lookup(cacheField(`json:"port"`), "json"); err != nil {
@@ -83,7 +89,7 @@ func TestTagCacheKeysOnTagAndTagKey(t *testing.T) {
 }
 
 func TestTagCacheStoresAFieldWithoutATag(t *testing.T) {
-	cache := newTagCache()
+	cache := testTagCache()
 	field := cacheField(`gorm:"column:port"`)
 
 	tag, err := cache.lookup(field, "json")
@@ -101,7 +107,7 @@ func TestTagCacheStoresAFieldWithoutATag(t *testing.T) {
 func TestTagCacheStoresErrors(t *testing.T) {
 	// A malformed tag is just as deterministic as a valid one, so it is cached
 	// too; otherwise every bind would rebuild the same error.
-	cache := newTagCache()
+	cache := testTagCache()
 	field := cacheField(`json:"port,requird"`)
 
 	for i := 0; i < 2; i++ {
@@ -117,7 +123,7 @@ func TestTagCacheStoresErrors(t *testing.T) {
 
 func TestTagCacheStoresTheUnreadableTagError(t *testing.T) {
 	// The other failure: a tag reflect cannot read at all.
-	cache := newTagCache()
+	cache := testTagCache()
 	field := cacheField(`json:"path,default=/var\,log"`)
 
 	for i := 0; i < 2; i++ {
@@ -134,7 +140,7 @@ func TestTagCacheStoresTheUnreadableTagError(t *testing.T) {
 func TestTagCacheKeepsEveryEntryAcrossWrites(t *testing.T) {
 	// Each write copies the map rather than filling it in place, so the question
 	// is whether the copy really carries everything over.
-	cache := newTagCache()
+	cache := testTagCache()
 
 	want := map[string]string{
 		`json:"a,default=1"`: "a",
@@ -190,7 +196,7 @@ func TestTagCacheServesTheBinder(t *testing.T) {
 }
 
 func TestNewTagCacheStartsEmpty(t *testing.T) {
-	cache := newTagCache()
+	cache := testTagCache()
 	if cache.size() != 0 {
 		t.Fatalf("size = %d, want an empty cache", cache.size())
 	}
@@ -534,7 +540,7 @@ func TestParseFieldTag(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := parseFieldTag(field(c.tag), c.key)
+			got, err := parseFieldTag(field(c.tag), c.key, nil)
 			if err != nil {
 				t.Fatalf("parseFieldTag(%q, %q): %v", c.tag, c.key, err)
 			}
@@ -548,7 +554,7 @@ func TestParseFieldTag(t *testing.T) {
 func TestParseFieldTagReportsAMalformedValue(t *testing.T) {
 	field := reflect.StructField{Name: "Port", Type: reflect.TypeOf(0), Tag: `json:"port,requird"`}
 
-	_, err := parseFieldTag(field, "json")
+	_, err := parseFieldTag(field, "json", nil)
 	if !errors.Is(err, ErrInvalidTag) {
 		t.Fatalf("error = %v, want ErrInvalidTag", err)
 	}
@@ -571,7 +577,7 @@ func TestParseFieldTagReportsAnUnreadableTag(t *testing.T) {
 			}
 
 			field := reflect.StructField{Name: "Path", Type: reflect.TypeOf(""), Tag: tag}
-			_, err := parseFieldTag(field, "json")
+			_, err := parseFieldTag(field, "json", nil)
 			if !errors.Is(err, ErrInvalidTag) {
 				t.Fatalf("error = %v, want ErrInvalidTag", err)
 			}
@@ -756,5 +762,235 @@ func TestSetOptionRefusesAValueItCannotScan(t *testing.T) {
 	}
 	if tag.Options != nil {
 		t.Fatalf("Options = %v, want the tag left untouched", tag.Options)
+	}
+}
+
+// The two options the tests below register. They are what an application does with
+// WithTagOption: a name readin does not know, whose meaning lives in the handler.
+const (
+	optCoerce = "coerce"
+	optBanner = "banner"
+)
+
+// lowerHandler lowercases a string field, which is the shape of "an option of my
+// own" that changes the value a field ends up with.
+func lowerHandler(dst reflect.Value, _, _ string) error {
+	if dst.Kind() == reflect.String {
+		dst.SetString(strings.ToLower(dst.String()))
+	}
+	return nil
+}
+
+// recorder returns a handler that remembers what it was called with, so that the
+// order and the arguments of the handlers are visible to the tests.
+func recorder(calls *[]string) TagOptionFunc {
+	return func(_ reflect.Value, value, path string) error {
+		*calls = append(*calls, value+" at "+path)
+		return nil
+	}
+}
+
+func TestParseTagWithRecordsACustomOption(t *testing.T) {
+	custom := map[string]TagOptionFunc{optCoerce: lowerHandler}
+
+	tag, err := parseTagWith("level,coerce=lower,required", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+
+	// The option is kept exactly as it was written: readin does not interpret it,
+	// because what it means is the handler's business.
+	if len(tag.Custom) != 1 {
+		t.Fatalf("Custom = %+v, want the one option", tag.Custom)
+	}
+	if tag.Custom[0].Name != optCoerce || tag.Custom[0].Value != "lower" {
+		t.Fatalf("Custom[0] = %+v, want coerce=lower", tag.Custom[0])
+	}
+
+	// The built-in options of the same tag are read as usual.
+	if !tag.Required {
+		t.Fatal("Required = false, want the built-in option of the same tag to be read")
+	}
+
+	// A tag without such an option has no list at all, which is what keeps the
+	// feature free for the configurations that do not use it.
+	if plain, err := parseTagWith("level,default=info", custom); err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	} else if plain.Custom != nil {
+		t.Fatalf("Custom = %+v, want nil when no such option is written", plain.Custom)
+	}
+}
+
+func TestParseTagWithKeepsTheOrderOfTheCustomOptions(t *testing.T) {
+	custom := map[string]TagOptionFunc{optCoerce: lowerHandler, optBanner: lowerHandler}
+
+	tag, err := parseTagWith("level,banner=hi,coerce=lower", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+
+	// The order of the tag is the order they will run in, which is what makes the
+	// result of two options on one field predictable.
+	if len(tag.Custom) != 2 || tag.Custom[0].Name != optBanner || tag.Custom[1].Name != optCoerce {
+		t.Fatalf("Custom = %+v, want banner then coerce", tag.Custom)
+	}
+}
+
+func TestParseTagWithRefusesACustomOptionWithoutAValue(t *testing.T) {
+	// An option has to be written with a value, like default=, options= and range=.
+	// Accepting `coerce` on its own would mean guessing what the application meant.
+	custom := map[string]TagOptionFunc{optCoerce: lowerHandler}
+
+	_, err := parseTagWith("level,coerce", custom)
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("error = %v, want ErrInvalidTag", err)
+	}
+	if !strings.Contains(err.Error(), optCoerce) {
+		t.Fatalf("error = %v, want it to name the option", err)
+	}
+}
+
+func TestParseTagOnlyKnowsTheBuiltInOptions(t *testing.T) {
+	// parseTag is the grammar with no application defined option, so a name readin
+	// does not know is still the typo protection it always was. It is what makes
+	// registering a name the thing that decides whether the name is accepted.
+	_, err := parseTag("level,coerce=lower")
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("error = %v, want ErrInvalidTag", err)
+	}
+	if !strings.Contains(err.Error(), "unknown option") {
+		t.Fatalf("error = %v, want the unknown option message", err)
+	}
+}
+
+func TestFieldTagApplyRunsTheCustomOptionsInOrder(t *testing.T) {
+	var calls []string
+	custom := map[string]TagOptionFunc{optCoerce: recorder(&calls), optBanner: recorder(&calls)}
+
+	tag, err := parseTagWith("level,banner=hi,coerce=lower", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+	if err := tag.apply(tagBytes("INFO"), "log.level", custom); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	want := []string{"hi at log.level", "lower at log.level"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestFieldTagApplyRunsTheHandlerOnTheValue(t *testing.T) {
+	custom := map[string]TagOptionFunc{optCoerce: lowerHandler}
+
+	tag, err := parseTagWith("level,coerce=lower", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+
+	value := tagBytes("INFO")
+	if err := tag.apply(value, "level", custom); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if value.String() != "info" {
+		t.Fatalf("value = %q, want the handler to have changed it", value.String())
+	}
+}
+
+func TestFieldTagApplyChecksTheConstraintsFirst(t *testing.T) {
+	// The built-in constraints run before the handlers, so a value that is not
+	// allowed is reported by options= instead of being handed to a handler that
+	// would have to repeat the check.
+	ran := false
+	custom := map[string]TagOptionFunc{optCoerce: func(reflect.Value, string, string) error {
+		ran = true
+		return nil
+	}}
+
+	tag, err := parseTagWith("level,options=info|warn,coerce=lower", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+	err = tag.apply(tagBytes("trace"), "level", custom)
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("apply = %v, want ErrInvalidValue from the constraint", err)
+	}
+	if ran {
+		t.Fatal("a handler ran although the value had already been refused")
+	}
+}
+
+func TestFieldTagApplySkipsANilPointer(t *testing.T) {
+	// An optional pointer that the configuration does not mention stays nil: no
+	// handler runs on a value readin allocated just to have something to hand over.
+	ran := false
+	custom := map[string]TagOptionFunc{optCoerce: func(reflect.Value, string, string) error {
+		ran = true
+		return nil
+	}}
+
+	tag, err := parseTagWith("level,coerce=lower", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+
+	pointer := reflect.New(reflect.TypeOf((*string)(nil))).Elem()
+	if err := tag.apply(pointer, "level", custom); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if ran {
+		t.Fatal("a handler ran on a nil pointer")
+	}
+	if !pointer.IsNil() {
+		t.Fatal("the pointer was allocated")
+	}
+}
+
+func TestFieldTagApplyReportsAHandlerFailureWithThePath(t *testing.T) {
+	boom := errors.New("that name is reserved")
+	custom := map[string]TagOptionFunc{optCoerce: func(reflect.Value, string, string) error { return boom }}
+
+	tag, err := parseTagWith("name,coerce=lower", custom)
+	if err != nil {
+		t.Fatalf("parseTagWith: %v", err)
+	}
+	err = tag.apply(tagBytes("app"), "db.name", custom)
+	if !errors.Is(err, boom) {
+		t.Fatalf("apply = %v, want the failure of the handler", err)
+	}
+	if !strings.Contains(err.Error(), "db.name") {
+		t.Fatalf("error = %v, want the field path", err)
+	}
+}
+
+func TestFieldTagApplyWithoutARegisteredHandler(t *testing.T) {
+	// Unreachable through the public API, because a tag is only ever parsed with
+	// the options of the binder that parses it and the cache holding the result
+	// belongs to that binder. It is reported rather than skipped, so an
+	// inconsistency cannot hide as a field that quietly kept the wrong value.
+	tag := fieldTag{Name: "level", Custom: []customTag{{Name: optCoerce, Value: "lower"}}}
+
+	err := tag.apply(tagBytes("INFO"), "level", nil)
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("apply = %v, want ErrInvalidTag", err)
+	}
+	if !strings.Contains(err.Error(), "level") {
+		t.Fatalf("error = %v, want the field path", err)
+	}
+}
+
+func TestFieldTagApplyWithoutCustomOptions(t *testing.T) {
+	// The common case: a tag whose options are all built-in, applied with an option
+	// set that is not there. It must behave exactly as it did before the feature.
+	tag, err := parseTag("port,range=[1,65535]")
+	if err != nil {
+		t.Fatalf("parseTag: %v", err)
+	}
+	if err := tag.apply(tagBytes(8080), "port", nil); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := tag.apply(tagBytes(70000), "port", nil); !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("apply = %v, want the constraint to be enforced", err)
 	}
 }

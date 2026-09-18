@@ -177,7 +177,15 @@ func (c *converter) assignInterface(dst reflect.Value, src any, path string) err
 // the tag options working inside []Struct and map[string]Struct fields as well.
 // A string is only accepted for the structs that have a textual form: time.Time
 // and the types implementing encoding.TextUnmarshaler.
+//
+// A struct implementing json.Unmarshaler comes before all of that: it asked to
+// parse itself, so it is handed the value, as text when the value is written as a
+// string and re-encoded as JSON otherwise. See unmarshalJSON.
 func (c *converter) assignStruct(dst reflect.Value, src any, path string) error {
+	if handled, err := c.unmarshalJSON(dst, src, path); handled {
+		return err
+	}
+
 	if tree, ok := src.(map[string]any); ok {
 		if !isBindableStruct(dst.Type()) {
 			return invalidValue(src, dst.Type(), path)
@@ -369,6 +377,51 @@ func (c *converter) unmarshalText(dst reflect.Value, text, path string) (bool, e
 	if err := unmarshaler.UnmarshalText([]byte(text)); err != nil {
 		return true, fieldError(path, fmt.Errorf("%w: %q cannot be parsed as %s: %v",
 			ErrInvalidValue, text, dst.Type(), err))
+	}
+	return true, nil
+}
+
+// unmarshalJSON lets a struct read itself out of a config value, through its own
+// encoding/json implementation.
+//
+// A string is handed over as it is written, like the text of an env= or default=
+// option and like every other string readin interprets: the syntax of such a type
+// is text, and writing it as a quoted string is the way to keep a document
+// readable. Any other value is re-encoded as JSON first, because JSON is the one
+// neutral text readin can produce from a tree whose values may have come from any
+// of its formats.
+//
+// It is the hook for a type whose syntax cannot be described by tags: a rule set, a
+// pattern list, a small expression language.
+//
+// It reports whether the type has such an implementation, so that callers can fall
+// back to their ordinary handling. Only structs are considered, for the same reason
+// the text of an option is not JSON encoded for them: a scalar or a byte sequence
+// has its textual form through encoding.TextUnmarshaler, and reading a []byte as a
+// JSON document would change what such a field means. time.Time is excluded like it
+// is in unmarshalText, since it keeps the more forgiving layouts of parseTime.
+func (c *converter) unmarshalJSON(dst reflect.Value, src any, path string) (bool, error) {
+	if dst.Kind() != reflect.Struct || dst.Type() == timeType || !dst.CanAddr() {
+		return false, nil
+	}
+	unmarshaler, ok := dst.Addr().Interface().(json.Unmarshaler)
+	if !ok {
+		return false, nil
+	}
+
+	data, isText := src.(string)
+	if !isText {
+		encoded, err := json.Marshal(src)
+		if err != nil {
+			return true, fieldError(path, fmt.Errorf("%w: the %s cannot be encoded as JSON for %s: %v",
+				ErrInvalidValue, kindOf(src), dst.Type(), err))
+		}
+		data = string(encoded)
+	}
+
+	if err := unmarshaler.UnmarshalJSON([]byte(data)); err != nil {
+		return true, fieldError(path, fmt.Errorf("%w: the %s cannot be parsed as %s: %v",
+			ErrInvalidValue, kindOf(src), dst.Type(), err))
 	}
 	return true, nil
 }

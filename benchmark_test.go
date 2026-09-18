@@ -48,6 +48,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -243,6 +244,22 @@ func BenchmarkReaderLoadBytes(b *testing.B) {
 	}
 }
 
+// BenchmarkReaderLoadBytesWithPrefix adds the section selection to the end-to-end
+// path: the document is decoded and expanded as usual, and the section is then
+// resolved with one key lookup per level of the path.
+func BenchmarkReaderLoadBytesWithPrefix(b *testing.B) {
+	reader := New(WithPrefix("nested"))
+	content := []byte(benchYAMLDocument)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		cfg := benchNested{}
+		if err := reader.LoadBytes(content, FormatYAML, &cfg); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkReaderLoadBytesWithExpansion adds the expander to the end-to-end
 // path. The document has no reference to expand, which makes this the floor of
 // the extra cost; BenchmarkEnvExpanderExpand measures the work itself.
@@ -339,6 +356,41 @@ func BenchmarkStructBinderBindFlat(b *testing.B) {
 	}
 }
 
+// benchOptionConfig is benchFlat with one option of the application's own added to
+// the field that can carry it. Keeping the two structs identical otherwise is what
+// lets the benchmarks below isolate what an option costs.
+type benchOptionConfig struct {
+	Name    string        `json:"name,default=readin,coerce=lower"`
+	Port    int           `json:"port,required,range=[1,65535]"`
+	Wait    time.Duration `json:"wait,default=5s"`
+	Debug   bool          `json:"debug"`
+	Ratio   float64       `json:"ratio,default=0.5"`
+	Timeout int64         `json:"timeout,default=30"`
+}
+
+// BenchmarkStructBinderTagOption measures the cost of an application defined tag
+// option: one map lookup and one call, on the field that carries the option.
+// Comparing it with BenchmarkStructBinderBindFlat is what says what the feature
+// costs, and a binder with nothing registered pays nothing for it at all, which is
+// why that benchmark is the one that has to stay unchanged.
+func BenchmarkStructBinderTagOption(b *testing.B) {
+	binder := NewStructBinder(WithBinderTagOption("coerce", func(dst reflect.Value, _, _ string) error {
+		if dst.Kind() == reflect.String {
+			dst.SetString(strings.ToLower(dst.String()))
+		}
+		return nil
+	}))
+	tree := benchmarkTree(b, benchFlatDocument)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		cfg := benchOptionConfig{}
+		if err := binder.Bind(tree, &cfg); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // BenchmarkParseTag measures one tag parse, which is what the binder paid per
 // exported field per bind before the tag cache existed. With the cache (see
 // tagCache) a tag is parsed once per binder instead, so this number is the first
@@ -367,12 +419,13 @@ func BenchmarkParseTagPlain(b *testing.B) {
 	}
 }
 
-// BenchmarkTagCacheLookup is the steady state of the tag path: one atomic load
-// and one map read, run for every exported field of every bind (see tagCache).
-// The gap against BenchmarkParseTag is what the cache buys; the parallel variant
-// shows that concurrent loads do not have to serialise on it.
+// BenchmarkTagCacheLookup is the steady state of the tag path: one atomic load and
+// one map read, with nothing copied out of the entry (see tagCache), run for every
+// exported field of every bind. The gap against BenchmarkParseTag is what the cache
+// buys; the parallel variant shows that concurrent loads do not have to serialise
+// on it.
 func BenchmarkTagCacheLookup(b *testing.B) {
-	cache := newTagCache()
+	cache := newTagCache(nil)
 	field := reflect.TypeOf(benchConfig{}).Field(0)
 	tag, err := cache.lookup(field, defaultTagKey)
 	if err != nil {
@@ -391,7 +444,7 @@ func BenchmarkTagCacheLookup(b *testing.B) {
 }
 
 func BenchmarkTagCacheLookupParallel(b *testing.B) {
-	cache := newTagCache()
+	cache := newTagCache(nil)
 	field := reflect.TypeOf(benchConfig{}).Field(0)
 	if _, err := cache.lookup(field, defaultTagKey); err != nil {
 		b.Fatalf("lookup: %v", err)

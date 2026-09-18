@@ -42,6 +42,10 @@ var (
 	// file, in the environment or in a default.
 	ErrMissingField = errors.New("readin: required field is missing")
 
+	// ErrMissingSection reports that the section a Reader was narrowed to with
+	// WithPrefix is not in the configuration.
+	ErrMissingSection = errors.New("readin: config section is missing")
+
 	// ErrInvalidValue reports a config value that cannot be used for its field:
 	// it cannot be converted into the type of the field (a wrong shape, an overflow,
 	// a fractional value for an integer, a negative value for an unsigned field), or

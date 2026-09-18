@@ -20,7 +20,13 @@
 //	Validator   how a struct checks itself      implemented by your own struct
 //
 // Named decorates any Source with a name for error messages, and Reader is the
-// facade that wires the stages together.
+// facade that wires the stages together. Chain combines several Expanders, since
+// a Reader holds one, and WithPrefix narrows the whole pipeline to a single
+// section of the document.
+//
+// The tag grammar can be extended from the outside with WithTagOption: it accepts
+// a name readin does not know and runs the handler registered with it once the
+// field has a value, while an unregistered name stays an error.
 //
 // # Quick start
 //

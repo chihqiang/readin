@@ -91,6 +91,109 @@ func TestExpanderErrorStopsTheLoad(t *testing.T) {
 	}
 }
 
+func TestChainRunsTheExpandersInOrder(t *testing.T) {
+	// A Reader holds one Expander, so Chain is how more than one is installed:
+	// each one sees the tree the previous one returned.
+	reader := New(WithExpander(Chain(
+		expanderFunc(func(tree map[string]any) (map[string]any, error) {
+			tree["steps"] = "one"
+			return tree, nil
+		}),
+		expanderFunc(func(tree map[string]any) (map[string]any, error) {
+			tree["steps"] = tree["steps"].(string) + "-two"
+			return tree, nil
+		}),
+	)))
+
+	var cfg struct {
+		Name  string `json:"name,required"`
+		Steps string `json:"steps"`
+	}
+	if err := reader.LoadBytes([]byte("name: readin\n"), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if cfg.Steps != "one-two" {
+		t.Fatalf("Steps = %q, want both expanders to have run in order", cfg.Steps)
+	}
+}
+
+func TestChainStopsAtTheFirstError(t *testing.T) {
+	boom := errors.New("no secrets available")
+	ran := false
+	after := expanderFunc(func(tree map[string]any) (map[string]any, error) {
+		ran = true
+		return tree, nil
+	})
+
+	reader := New(WithExpander(Chain(
+		expanderFunc(func(map[string]any) (map[string]any, error) { return nil, boom }),
+		after,
+	)))
+
+	var cfg struct {
+		Name string `json:"name"`
+	}
+	err := reader.LoadBytes([]byte("name: readin\n"), FormatYAML, &cfg)
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want the failure of the first expander", err)
+	}
+	if ran {
+		t.Fatal("an expander ran after the chain had already failed")
+	}
+}
+
+func TestChainOfOneIsThatExpander(t *testing.T) {
+	// A chain that ends up holding a single expander is not wrapped: an expander
+	// that returns its input as it is stays the one the Reader calls, which is what
+	// keeps EnvExpander's cheap path (no reference, no copy) reachable through a
+	// Chain.
+	env := NewEnvExpander(WithEnvLookup(envLookup(map[string]string{"HOST": "db.internal"})))
+
+	if got := Chain(env); got != Expander(env) {
+		t.Fatalf("Chain(env) = %T, want the expander itself", got)
+	}
+	if got := Chain(nil, env); got != Expander(env) {
+		t.Fatalf("Chain(nil, env) = %T, want the nil to be skipped and the expander kept", got)
+	}
+	if two := Chain(env, env); two == Expander(env) {
+		t.Fatal("Chain(env, env) = the expander itself, want a chain of two")
+	}
+
+	tree := map[string]any{"host": "${HOST}", "port": json.Number("5432")}
+	expanded, err := Chain(env).Expand(tree)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if expanded["host"] != "db.internal" {
+		t.Fatalf("host = %#v, want the reference resolved", expanded["host"])
+	}
+}
+
+func TestChainWithoutAnExpander(t *testing.T) {
+	// Chain() is a valid no-op, and a nil expander in the list is skipped rather
+	// than turning into a crash, like every other option that takes an interface.
+	chain := Chain(nil, nil)
+
+	tree := map[string]any{"name": "readin"}
+	expanded, err := chain.Expand(tree)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if expanded["name"] != "readin" {
+		t.Fatalf("Expand = %#v, want the tree unchanged", expanded)
+	}
+
+	// It still answers a nil tree with an empty, writable one, like the expanders
+	// it stands in for.
+	empty, err := chain.Expand(nil)
+	if err != nil {
+		t.Fatalf("Expand(nil): %v", err)
+	}
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("Expand(nil) = %#v, want an empty non-nil tree", empty)
+	}
+}
+
 func TestExpanderRunsAfterDecodingAndBeforeBinding(t *testing.T) {
 	seed := errors.New("expander saw the decoded tree")
 	var seen map[string]any

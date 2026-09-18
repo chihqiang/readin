@@ -1,6 +1,7 @@
 package readin
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -481,5 +482,276 @@ func TestReaderDecodeKeepsTheTreeStable(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("first = %#v, second = %#v, want equal trees", first, second)
+	}
+}
+
+// sectionDocument is the document the WithPrefix tests read: one section per way
+// a prefix can be resolved.
+const sectionDocument = `
+app:
+  name: gateway
+  server:
+    host: example.com
+    port: 8080
+  peers:
+    - name: peer-a
+worker:
+  name: worker
+`
+
+// sectionTarget is the struct a prefix is bound into. It holds a nested
+// section, a list and a default, so that the tests show that narrowing the tree
+// does not change how the tree is read afterwards.
+type sectionTarget struct {
+	Name   string `json:"name"`
+	Level  string `json:"level,default=info"`
+	Server struct {
+		Host string `json:"host,default=localhost"`
+		Port int    `json:"port,range=[1,65535]"`
+	} `json:"server"`
+	Peers []struct {
+		Name string `json:"name"`
+	} `json:"peers"`
+}
+
+func TestWithPrefixReadsOneSection(t *testing.T) {
+	reader := New(WithPrefix("app"))
+
+	var cfg sectionTarget
+	if err := reader.LoadBytes([]byte(sectionDocument), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+
+	if cfg.Name != "gateway" {
+		t.Errorf("Name = %q, want the value from the app section", cfg.Name)
+	}
+	if cfg.Level != "info" {
+		t.Errorf("Level = %q, want the default to still apply", cfg.Level)
+	}
+	if cfg.Server.Host != "example.com" || cfg.Server.Port != 8080 {
+		t.Errorf("Server = %+v, want the nested section to be filled", cfg.Server)
+	}
+	if len(cfg.Peers) != 1 || cfg.Peers[0].Name != "peer-a" {
+		t.Errorf("Peers = %+v, want the list inside the section", cfg.Peers)
+	}
+}
+
+func TestWithPrefixNestedPath(t *testing.T) {
+	// A dotted path walks one level per element, so it reaches a section inside a
+	// section.
+	reader := New(WithPrefix("app.server"))
+
+	var cfg struct {
+		Host string `json:"host,required"`
+		Port int    `json:"port,required"`
+	}
+	if err := reader.LoadBytes([]byte(sectionDocument), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if cfg.Host != "example.com" || cfg.Port != 8080 {
+		t.Fatalf("cfg = %+v, want the values of app.server", cfg)
+	}
+
+	// The keys on the way are matched like any other key, spaces and all.
+	spaced := New(WithPrefix(" app . server "))
+	if err := spaced.LoadBytes([]byte(sectionDocument), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes with spaces around the keys: %v", err)
+	}
+}
+
+func TestWithPrefixRequiresTheSection(t *testing.T) {
+	cases := []struct {
+		name     string
+		document string
+		prefix   string
+		want     string
+	}{
+		{"absent section", "app:\n  name: gateway\n", "portal", `"portal"`},
+		{"absent nested section", "app:\n  name: gateway\n", "app.missing", `"app.missing"`},
+		{"null section", "app: null\n", "app", `"app"`},
+		{"value instead of a section", "app: 8080\n", "app", "is not a section: got number"},
+		{"list instead of a section", "app: [1, 2]\n", "app", "is not a section: got array"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reader := New(WithPrefix(c.prefix))
+
+			var cfg sectionTarget
+			err := reader.LoadBytes([]byte(c.document), FormatYAML, &cfg)
+			if !errors.Is(err, ErrMissingSection) {
+				t.Fatalf("LoadBytes = %v, want ErrMissingSection", err)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error = %v, want it to name %s", err, c.want)
+			}
+			// The source is named, since the prefix alone does not say where the
+			// section was looked for.
+			if !strings.Contains(err.Error(), "<bytes>") {
+				t.Errorf("error = %v, want it to name the source", err)
+			}
+		})
+	}
+}
+
+func TestWithPrefixEmptySectionKeepsDefaults(t *testing.T) {
+	// A section that is there but empty is a valid empty configuration: an
+	// explicit `server: {}` is a different thing from a document that has no
+	// server at all, and it keeps the defaults.
+	reader := New(WithPrefix("app"))
+
+	var cfg sectionTarget
+	if err := reader.LoadBytes([]byte("app: {}\n"), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if cfg.Level != "info" || cfg.Server.Host != "localhost" {
+		t.Fatalf("cfg = %+v, want the defaults inside the empty section", cfg)
+	}
+}
+
+func TestWithPrefixDecodeReturnsTheSection(t *testing.T) {
+	// Decode is the first half of Load, so it resolves the prefix as well: the
+	// tree it returns is the configuration the Reader is narrowed to.
+	reader := New(WithPrefix("app.server"))
+
+	tree, err := reader.Decode(NewString(sectionDocument, FormatYAML))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	want := map[string]any{"host": "example.com", "port": json.Number("8080")}
+	if !reflect.DeepEqual(tree, want) {
+		t.Fatalf("Decode = %#v, want %#v", tree, want)
+	}
+}
+
+func TestWithPrefixKeepsPathsRelativeToTheSection(t *testing.T) {
+	// A field path in an error is the path the target asks for, so it does not
+	// mention the prefix: the constraints inside the section behave exactly as
+	// they do in a document whose root is that section.
+	reader := New(WithPrefix("app"))
+
+	var cfg sectionTarget
+	err := reader.LoadBytes([]byte("app:\n  server:\n    port: 70000\n"), FormatYAML, &cfg)
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("LoadBytes = %v, want ErrInvalidValue", err)
+	}
+	if field, ok := err.(*FieldError); !ok || field.Field != "server.port" {
+		t.Fatalf("error = %v, want the path server.port", err)
+	}
+
+	// A required field inside the section is reported the same way: the app
+	// section of this document has no name.
+	var required struct {
+		Name string `json:"name,required"`
+	}
+	err = reader.LoadBytes([]byte("app:\n  level: info\n"), FormatYAML, &required)
+	if !errors.Is(err, ErrMissingField) {
+		t.Fatalf("LoadBytes = %v, want ErrMissingField", err)
+	}
+}
+
+func TestWithPrefixKeyMatcher(t *testing.T) {
+	// The keys of the path are matched with the key matcher, so the default
+	// matcher finds a section written differently and ExactKey does not.
+	var cfg sectionTarget
+
+	loose := New(WithPrefix("APP"))
+	if err := loose.LoadBytes([]byte(sectionDocument), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes with the case insensitive matcher: %v", err)
+	}
+	if cfg.Name != "gateway" || cfg.Server.Port != 8080 {
+		t.Errorf("cfg = %+v, want the section found whatever its case", cfg)
+	}
+
+	exact := New(WithPrefix("APP"), WithKeyMatcher(ExactKey))
+	err := exact.LoadBytes([]byte(sectionDocument), FormatYAML, &cfg)
+	if !errors.Is(err, ErrMissingSection) {
+		t.Fatalf("LoadBytes with ExactKey = %v, want ErrMissingSection", err)
+	}
+}
+
+func TestWithPrefixAmbiguousLevel(t *testing.T) {
+	// Two keys the matcher cannot tell apart make the level ambiguous, which is
+	// reported instead of depending on the iteration order of a map.
+	reader := New(WithPrefix("app"))
+
+	var cfg sectionTarget
+	err := reader.LoadBytes([]byte("App:\n  name: a\napp:\n  name: b\n"), FormatYAML, &cfg)
+	if !errors.Is(err, ErrDuplicateKey) {
+		t.Fatalf("LoadBytes = %v, want ErrDuplicateKey", err)
+	}
+}
+
+func TestWithPrefixWithoutAFile(t *testing.T) {
+	// FillDefault has no document to look into, so a prefix has nothing to
+	// resolve and the defaults of the target apply as usual.
+	reader := New(WithPrefix("app"))
+
+	cfg := sectionTarget{}
+	if err := reader.FillDefault(&cfg); err != nil {
+		t.Fatalf("FillDefault: %v", err)
+	}
+	if cfg.Name != "" || cfg.Server.Port != 0 {
+		t.Fatalf("cfg = %+v, want no value from a document that was never read", cfg)
+	}
+	if cfg.Level != "info" || cfg.Server.Host != "localhost" {
+		t.Fatalf("cfg = %+v, want the defaults of the target", cfg)
+	}
+}
+
+func TestWithPrefixAfterExpansion(t *testing.T) {
+	// The section is taken after the expansion, so a prefix can name a key that
+	// only exists once the references are resolved.
+	reader := New(
+		WithEnvExpansion(WithEnvLookup(envLookup(map[string]string{"READIN_SECTION": "app"}))),
+		WithPrefix("app"),
+	)
+
+	var cfg sectionTarget
+	if err := reader.LoadBytes([]byte("${READIN_SECTION}:\n  name: gateway\n"), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if cfg.Name != "gateway" {
+		t.Fatalf("Name = %q, want the section found through the expanded key", cfg.Name)
+	}
+
+	// The other side of the same order: expansion still sees the whole document,
+	// so a strict expander reports a reference in a section that is not read.
+	strict := New(
+		WithEnvExpansion(WithEnvLookup(envLookup(nil)), WithEnvStrict()),
+		WithPrefix("app"),
+	)
+	err := strict.LoadBytes([]byte("other:\n  dsn: ${NOT_SET}\napp:\n  name: gateway\n"), FormatYAML, &cfg)
+	if !errors.Is(err, ErrEnvNotSet) {
+		t.Fatalf("LoadBytes = %v, want ErrEnvNotSet for the section that is not read", err)
+	}
+}
+
+func TestWithPrefixRootReader(t *testing.T) {
+	// The same document read without a prefix is not narrowed at all, which is
+	// what makes the prefix the only thing the tests above change.
+	var cfg sectionTarget
+	if err := New().LoadBytes([]byte(sectionDocument), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if cfg.Name != "" {
+		t.Fatalf("Name = %q, want the root of the document to be read", cfg.Name)
+	}
+}
+
+func TestWithPrefixLoadFileNamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(sectionDocument), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	var cfg sectionTarget
+	err := New(WithPrefix("portal")).LoadFile(path, &cfg)
+	if !errors.Is(err, ErrMissingSection) {
+		t.Fatalf("LoadFile = %v, want ErrMissingSection", err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error = %v, want it to name the file", err)
 	}
 }

@@ -1152,6 +1152,230 @@ func TestConverterAssignStringToAStructWithItsOwnParser(t *testing.T) {
 	}
 }
 
+// jsonStruct asks to parse itself through encoding/json, which is the hook for a
+// syntax that tags cannot describe.
+type jsonStruct struct {
+	Values []string
+	raw    string
+}
+
+var _ json.Unmarshaler = (*jsonStruct)(nil)
+
+func (j *jsonStruct) UnmarshalJSON(data []byte) error {
+	j.raw = string(data)
+
+	// A JSON array and a comma separated string are both accepted, which is what
+	// makes the hook more than a decoder for one shape.
+	if err := json.Unmarshal(data, &j.Values); err != nil {
+		j.Values = splitText(strings.Trim(string(data), `"`))
+	}
+	return nil
+}
+
+// splitText is the comma separation jsonStruct falls back to.
+func splitText(text string) []string {
+	var values []string
+	for _, item := range strings.Split(text, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			values = append(values, item)
+		}
+	}
+	return values
+}
+
+type jsonFailing struct{}
+
+func (j *jsonFailing) UnmarshalJSON([]byte) error { return errors.New("not a rule set") }
+
+// jsonRecorder keeps the bytes readin handed to it, which is how the tests below
+// pin down what the hook is given for each shape of value.
+type jsonRecorder struct{ raw string }
+
+var _ json.Unmarshaler = (*jsonRecorder)(nil)
+
+func (j *jsonRecorder) UnmarshalJSON(data []byte) error {
+	j.raw = string(data)
+	return nil
+}
+
+func TestConverterJSONUnmarshalerTakesEveryShape(t *testing.T) {
+	converter := testConverter()
+
+	cases := []struct {
+		name string
+		src  any
+		want []string
+	}{
+		{"list", []any{"a", "b"}, []string{"a", "b"}},
+		{"singular value in a list", []any{"a"}, []string{"a"}},
+		{"comma separated string", "a, b ,,c", []string{"a", "b", "c"}},
+		{"single string", "a", []string{"a"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dst := newTarget(jsonStruct{})
+			if err := converter.assign(dst, c.src, "rules"); err != nil {
+				t.Fatalf("assign(%#v): %v", c.src, err)
+			}
+			if got := dst.Interface().(jsonStruct); !reflect.DeepEqual(got.Values, c.want) {
+				t.Fatalf("Values = %v, want %v (the type saw %s)", got.Values, c.want, got.raw)
+			}
+		})
+	}
+
+	// The text of an env= or default= option reaches the same parser, so the hook
+	// is not limited to values read from the config file.
+	dst := newTarget(jsonStruct{})
+	if err := converter.assignString(dst, "a,b", "rules"); err != nil {
+		t.Fatalf("assignString: %v", err)
+	}
+	if got := dst.Interface().(jsonStruct); !reflect.DeepEqual(got.Values, []string{"a", "b"}) {
+		t.Fatalf("Values = %v, want [a b]", got.Values)
+	}
+}
+
+func TestConverterJSONUnmarshalerIsHandedTheValueAsJSON(t *testing.T) {
+	// A value that is not a string is re-encoded as JSON, which is the one neutral
+	// text readin can produce whatever format the document was written in. A string
+	// is handed over as it is written, like every other string readin interprets.
+	converter := testConverter()
+
+	cases := []struct {
+		name string
+		src  any
+		want string
+	}{
+		{"list", []any{"a", "b"}, `["a","b"]`},
+		{"object", map[string]any{"Values": []any{"a"}}, `{"Values":["a"]}`},
+		{"number", json.Number("9000"), `9000`},
+		{"boolean", true, `true`},
+		{"string", "a,b", `a,b`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dst := newTarget(jsonRecorder{})
+			if err := converter.assign(dst, c.src, "rules"); err != nil {
+				t.Fatalf("assign(%#v): %v", c.src, err)
+			}
+			if got := dst.Interface().(jsonRecorder); got.raw != c.want {
+				t.Fatalf("the parser saw %q, want %q", got.raw, c.want)
+			}
+		})
+	}
+
+	// A null is not a value: the parser is not called at all, like everywhere else
+	// in the converter.
+	dst := newTarget(jsonRecorder{raw: "untouched"})
+	if err := converter.assign(dst, nil, "rules"); err != nil {
+		t.Fatalf("assign(nil): %v", err)
+	}
+	if got := dst.Interface().(jsonRecorder); got.raw != "untouched" {
+		t.Fatalf("the parser ran on a null: %q", got.raw)
+	}
+}
+
+func TestConverterJSONUnmarshalerFailureCarriesThePath(t *testing.T) {
+	err := testConverter().assign(newTarget(jsonFailing{}), []any{"a"}, "rules")
+
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("assign = %v, want ErrInvalidValue", err)
+	}
+	if !contains(err.Error(), "rules", "not a rule set") {
+		t.Fatalf("error = %v, want the field path and the parser message", err)
+	}
+}
+
+func TestConverterJSONUnmarshalerWithAnUnencodableValue(t *testing.T) {
+	// A value that JSON cannot encode is reported instead of being half converted.
+	// The decoders produce canonical values, all of which encode, so only a custom
+	// Expander can put such a value in the tree; the failure still has to say which
+	// field it happened on.
+	err := testConverter().assign(newTarget(jsonRecorder{}), map[string]any{"f": func() {}}, "rules")
+
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("assign = %v, want ErrInvalidValue", err)
+	}
+	if !contains(err.Error(), "rules", "cannot be encoded as JSON") {
+		t.Fatalf("error = %v, want the field path and the reason", err)
+	}
+}
+
+func TestConverterTextUnmarshalerBeatsJSONUnmarshaler(t *testing.T) {
+	// A type with both implementations keeps its textual form for a string value:
+	// TextUnmarshaler is what readin honours for every string, and a type that
+	// implements it is not a type with a JSON shaped syntax.
+	dst := newTarget(bothUnmarshalers{})
+	if err := testConverter().assign(dst, "small", "value"); err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	if got := dst.Interface().(bothUnmarshalers); got.Text != "SMALL" || got.SawJSON {
+		t.Fatalf("dst = %+v, want UnmarshalText to have run alone", got)
+	}
+
+	// A value that is not a string is JSON again.
+	if err := testConverter().assign(dst, []any{"a"}, "value"); err != nil {
+		t.Fatalf("assign(list): %v", err)
+	}
+	if !dst.Interface().(bothUnmarshalers).SawJSON {
+		t.Fatal("a list value did not reach UnmarshalJSON")
+	}
+}
+
+// bothUnmarshalers implements encoding.TextUnmarshaler and json.Unmarshaler, to
+// pin down which one wins for which shape of value.
+type bothUnmarshalers struct {
+	Text    string
+	SawJSON bool
+}
+
+var (
+	_ encoding.TextUnmarshaler = (*bothUnmarshalers)(nil)
+	_ json.Unmarshaler         = (*bothUnmarshalers)(nil)
+)
+
+func (b *bothUnmarshalers) UnmarshalText(text []byte) error {
+	b.Text = strings.ToUpper(string(text))
+	return nil
+}
+
+func (b *bothUnmarshalers) UnmarshalJSON([]byte) error {
+	b.SawJSON = true
+	return nil
+}
+
+func TestConverterJSONUnmarshalerDoesNotChangeOtherShapes(t *testing.T) {
+	// A scalar, a byte sequence and time.Time have their own textual form, and
+	// reading them as a JSON document would change what the field means: the hook
+	// is for structs only.
+	converter := testConverter()
+
+	if err := converter.assign(newTarget("text"), "raw", "value"); err != nil {
+		t.Fatalf("assign(string): %v", err)
+	}
+	if err := converter.assign(newTarget([]byte{}), `{"a": 1}`, "blob"); err != nil {
+		t.Fatalf("assign([]byte): %v", err)
+	}
+	if err := converter.assign(newTarget(time.Time{}), "2026-09-17T10:00:00Z", "at"); err != nil {
+		t.Fatalf("assign(time.Time): %v", err)
+	}
+
+	// An implemented hook does not make a struct bindable in a way that skips the
+	// tags: with no value for the field at all, the defaults inside it still apply.
+	var cfg struct {
+		Rules jsonStruct `json:"rules"`
+		Level string     `json:"level,default=info"`
+	}
+	if err := NewStructBinder().Bind(nil, &cfg); err != nil {
+		t.Fatalf("Bind(nil): %v", err)
+	}
+	if cfg.Level != "info" {
+		t.Fatalf("Level = %q, want the defaults to apply", cfg.Level)
+	}
+	if cfg.Rules.raw != "" {
+		t.Fatalf("raw = %q, want the parser not to run without a value", cfg.Rules.raw)
+	}
+}
+
 // The helpers below keep the table in TestToHelpersRefuseUnknownShapes readable.
 func errorOfInt64(src any) error {
 	_, err := toInt64(src)

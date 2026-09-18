@@ -817,3 +817,259 @@ func (l binderLimit) Validate() error {
 	}
 	return nil
 }
+
+// lowerOption is the tag option the tests below register on a binder: it records
+// the field path with the value the option was written with, and lowercases a
+// string field. That is enough to see that a handler ran, where, and with what,
+// while the field it changed is asserted on its own.
+func lowerOption(calls *[]string) TagOptionFunc {
+	return func(dst reflect.Value, option, path string) error {
+		*calls = append(*calls, path+"="+option)
+		if dst.Kind() == reflect.String {
+			dst.SetString(strings.ToLower(dst.String()))
+		}
+		return nil
+	}
+}
+
+func TestStructBinderRunsATagOption(t *testing.T) {
+	// The three ways a field gets a value all end in the handlers: a tag option is
+	// not limited to the config file.
+	var calls []string
+	var cfg struct {
+		FromFile    string `json:"fromFile,coerce=lower"`
+		FromDefault string `json:"fromDefault,default=INFO,coerce=lower"`
+		FromEnv     string `json:"fromEnv,env=READIN_TEST_LEVEL,coerce=lower"`
+	}
+
+	binder := NewStructBinder(
+		WithBinderTagOption(optCoerce, lowerOption(&calls)),
+		WithBinderEnvLookup(envLookup(map[string]string{"READIN_TEST_LEVEL": "WARN"})),
+	)
+	if err := binder.Bind(yamlTree(t, "fromFile: Mixed\n"), &cfg); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	if cfg.FromFile != "mixed" {
+		t.Errorf("FromFile = %q, want the value from the file to have been coerced", cfg.FromFile)
+	}
+	if cfg.FromDefault != "info" {
+		t.Errorf("FromDefault = %q, want the default to have been coerced", cfg.FromDefault)
+	}
+	if cfg.FromEnv != "warn" {
+		t.Errorf("FromEnv = %q, want the value from the environment to have been coerced", cfg.FromEnv)
+	}
+
+	want := []string{"fromFile=lower", "fromDefault=lower", "fromEnv=lower"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Errorf("calls = %v, want %v (the path with the option, in field order)", calls, want)
+	}
+}
+
+func TestStructBinderTagOptionSeesTheValueBehindAPointer(t *testing.T) {
+	// The handler is the counterpart of the built-in constraints, so it is given the
+	// value they were checked against: for a pointer field, the value behind the
+	// pointer. A pointer the configuration does not mention stays nil, and no
+	// handler runs for it.
+	var calls []string
+	var cfg struct {
+		Retries *int `json:"retries,coerce=double"`
+		Missing *int `json:"missing,coerce=double"`
+	}
+
+	double := func(dst reflect.Value, value, path string) error {
+		calls = append(calls, path+"="+value)
+		if dst.Kind() == reflect.Int {
+			dst.SetInt(dst.Int() * 2)
+		}
+		return nil
+	}
+
+	binder := NewStructBinder(WithBinderTagOption(optCoerce, double))
+	if err := binder.Bind(yamlTree(t, "retries: 3\n"), &cfg); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	if cfg.Retries == nil || *cfg.Retries != 6 {
+		t.Errorf("Retries = %v, want the handler to have changed the value behind the pointer", cfg.Retries)
+	}
+	if cfg.Missing != nil {
+		t.Errorf("Missing = %v, want an absent pointer to stay nil", cfg.Missing)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want only the field that had a value", calls)
+	}
+}
+
+func TestStructBinderTagOptionPathOfANestedField(t *testing.T) {
+	// The path a handler gets is the dotted config path of the field, the same one
+	// an error carries, list entries included.
+	var calls []string
+	var cfg struct {
+		Log struct {
+			Level string `json:"level,coerce=lower"`
+		} `json:"log"`
+		Peers []struct {
+			Name string `json:"name,coerce=lower"`
+		} `json:"peers"`
+	}
+
+	binder := NewStructBinder(WithBinderTagOption(optCoerce, lowerOption(&calls)))
+	content := "log:\n  level: INFO\npeers:\n  - name: A\n  - name: B\n"
+	if err := binder.Bind(yamlTree(t, content), &cfg); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+
+	want := []string{"log.level=lower", "peers[0].name=lower", "peers[1].name=lower"}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestStructBinderTagOptionFailureCarriesThePath(t *testing.T) {
+	boom := errors.New("that name is reserved")
+	refuse := func(reflect.Value, string, string) error { return boom }
+
+	var cfg struct {
+		Name string `json:"name,reserved=true"`
+	}
+	binder := NewStructBinder(WithBinderTagOption("reserved", refuse))
+
+	err := binder.Bind(yamlTree(t, "name: app\n"), &cfg)
+	if !errors.Is(err, boom) {
+		t.Fatalf("Bind = %v, want the failure of the handler", err)
+	}
+	if !strings.Contains(err.Error(), "name") {
+		t.Fatalf("error = %v, want the field path", err)
+	}
+}
+
+func TestStructBinderTagOptionIsCachedWithTheTag(t *testing.T) {
+	// The parsed tag holds the option, and the cache belongs to the binder, so a
+	// second bind runs the handler again without re-parsing the tag.
+	var calls []string
+	var cfg struct {
+		Level string `json:"level,default=INFO,coerce=lower"`
+	}
+
+	binder := NewStructBinder(WithBinderTagOption(optCoerce, lowerOption(&calls)))
+	for i := 0; i < 2; i++ {
+		cfg.Level = ""
+		if err := binder.Bind(nil, &cfg); err != nil {
+			t.Fatalf("Bind #%d: %v", i, err)
+		}
+		if cfg.Level != "info" {
+			t.Fatalf("Level = %q, want the handler to have run again", cfg.Level)
+		}
+	}
+
+	if got := binder.tags.size(); got != 1 {
+		t.Fatalf("cached tags = %d, want the tag stored once", got)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want one per bind", calls)
+	}
+}
+
+func TestStructBinderRefusesToRegisterATagOption(t *testing.T) {
+	// A registration that cannot work is refused rather than ignored, and the
+	// refusal reaches the caller: BinderOption has nowhere to return an error, so it
+	// is reported by the next Bind. A silently dropped option would be exactly the
+	// kind of surprise this package exists to prevent.
+	cases := []struct {
+		name    string
+		option  string
+		handler TagOptionFunc
+		want    string
+	}{
+		{"a built-in name", optRequired, lowerHandler, "built in"},
+		{"another built-in name", optRange, lowerHandler, "built in"},
+		{"an empty name", "", lowerHandler, "needs a name"},
+		{"a comma", "a,b", lowerHandler, "cannot hold"},
+		{"an equals sign", "a=b", lowerHandler, "cannot hold"},
+		{"a space", "a b", lowerHandler, "cannot hold"},
+		{"a pipe", "a|b", lowerHandler, "cannot hold"},
+		{"a quote", `a"b`, lowerHandler, "cannot hold"},
+		{"a bracket", "a[b]", lowerHandler, "cannot hold"},
+		{"no handler", optCoerce, nil, "no handler"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			binder := NewStructBinder(WithBinderTagOption(c.option, c.handler))
+
+			var cfg struct {
+				Name string `json:"name"`
+			}
+			err := binder.Bind(nil, &cfg)
+			if !errors.Is(err, ErrInvalidTag) {
+				t.Fatalf("Bind = %v, want ErrInvalidTag", err)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error = %v, want it to explain the refusal", err)
+			}
+		})
+	}
+
+	// The first refusal is the one reported: it is the earliest mistake, and the
+	// later ones cannot be trusted to be about a registration that was itself
+	// accepted.
+	binder := NewStructBinder(
+		WithBinderTagOption(optRequired, lowerHandler),
+		WithBinderTagOption("", lowerHandler),
+	)
+	if err := binder.Bind(nil, &struct{}{}); !strings.Contains(err.Error(), optRequired) {
+		t.Fatalf("error = %v, want the first refusal", err)
+	}
+}
+
+func TestStructBinderWithoutATagOption(t *testing.T) {
+	// Without a registration the option set stays closed, which is what keeps a
+	// typo an error rather than a field that quietly keeps the wrong value.
+	var cfg struct {
+		Level string `json:"level,coerce=lower"`
+	}
+
+	err := NewStructBinder().Bind(yamlTree(t, "level: INFO\n"), &cfg)
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("Bind = %v, want ErrInvalidTag", err)
+	}
+	if !strings.Contains(err.Error(), optCoerce) {
+		t.Fatalf("error = %v, want it to name the unknown option", err)
+	}
+	if cfg.Level != "" {
+		t.Fatalf("Level = %q, want nothing to be bound", cfg.Level)
+	}
+}
+
+func TestStructBinderTagOptionWithACustomTagKey(t *testing.T) {
+	// The option is read from the tag the binder was told to read, like every other
+	// option: a tag readin does not look at cannot register anything.
+	var calls []string
+	var cfg struct {
+		Level string `json:"level" conf:"level,coerce=lower"`
+	}
+
+	binder := NewStructBinder(
+		WithBinderTagKey("conf"),
+		WithBinderTagOption(optCoerce, lowerOption(&calls)),
+	)
+	if err := binder.Bind(yamlTree(t, "level: INFO\n"), &cfg); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if cfg.Level != "info" {
+		t.Fatalf("Level = %q, want the option of the conf tag to have run", cfg.Level)
+	}
+
+	// Reading the json tag instead finds no option at all, so the field keeps the
+	// value as it was written.
+	var jsonCfg struct {
+		Level string `json:"level" conf:"level,coerce=lower"`
+	}
+	if err := NewStructBinder(WithBinderTagOption(optCoerce, lowerOption(&calls))).
+		Bind(yamlTree(t, "level: INFO\n"), &jsonCfg); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if jsonCfg.Level != "INFO" {
+		t.Fatalf("Level = %q, want the json tag, which holds no option, to be read", jsonCfg.Level)
+	}
+}

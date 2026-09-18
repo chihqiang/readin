@@ -1,7 +1,9 @@
 package readin
 
 import (
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -156,6 +158,70 @@ func TestWithKeyMatcher(t *testing.T) {
 	}
 	if cfg.Port != 8080 {
 		t.Fatalf("Port = %d, want 8080 with the default matcher", cfg.Port)
+	}
+}
+
+func TestWithPrefix(t *testing.T) {
+	reader := New(WithPrefix("app.server"))
+	if reader.prefix != "app.server" {
+		t.Fatalf("prefix = %q, want the path to be kept as written", reader.prefix)
+	}
+
+	// Without the option the Reader reads the root of the document, and an empty
+	// path is not a prefix at all: it neither narrows anything nor makes the
+	// section mandatory. The behaviour of a prefix is tested against the Reader
+	// itself, in reader_test.go.
+	if reader := New(); reader.prefix != "" {
+		t.Fatal("a new Reader must read the whole document")
+	}
+	if reader := New(WithPrefix("")); reader.prefix != "" {
+		t.Fatal("WithPrefix(\"\") must not narrow the Reader")
+	}
+}
+
+func TestWithTagOption(t *testing.T) {
+	// The option of an application reaches the default binder, which is what makes
+	// a name readin does not know usable through a Reader.
+	var calls []string
+	reader := New(WithTagOption(optCoerce, lowerOption(&calls)))
+
+	var cfg struct {
+		Level string `json:"level,required,coerce=lower"`
+	}
+	if err := reader.LoadBytes([]byte("level: INFO\n"), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes: %v", err)
+	}
+	if cfg.Level != "info" {
+		t.Fatalf("Level = %q, want the handler to have run", cfg.Level)
+	}
+	if !reflect.DeepEqual(calls, []string{"level=lower"}) {
+		t.Fatalf("calls = %v, want the path with the option", calls)
+	}
+
+	// Without the registration the option set is closed, so the same document is an
+	// error: a name readin does not know is a typo until an application says
+	// otherwise.
+	err := New().LoadBytes([]byte("level: INFO\n"), FormatYAML, &cfg)
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("LoadBytes = %v, want ErrInvalidTag", err)
+	}
+	if !strings.Contains(err.Error(), optCoerce) {
+		t.Fatalf("error = %v, want it to name the unknown option", err)
+	}
+
+	// Like WithTagKey, it is an option of the default binder and is ignored when a
+	// custom Binder is installed: that binder parses its own tags.
+	custom := binderFunc(func(tree map[string]any, target any) error { return nil })
+	if err := New(WithBinder(custom), WithTagOption(optCoerce, lowerOption(&calls))).
+		LoadBytes([]byte("level: INFO\n"), FormatYAML, &cfg); err != nil {
+		t.Fatalf("LoadBytes with a custom Binder: %v", err)
+	}
+
+	// A registration that cannot work is reported by the load, not swallowed.
+	err = New(WithTagOption(optRequired, lowerOption(&calls))).
+		LoadBytes([]byte("level: INFO\n"), FormatYAML, &cfg)
+	if !errors.Is(err, ErrInvalidTag) {
+		t.Fatalf("LoadBytes = %v, want the refused registration to be reported", err)
 	}
 }
 

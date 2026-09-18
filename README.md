@@ -71,7 +71,7 @@ Source ──▶ Decoder ──▶ Expander ──▶ Binder ──▶ Validator
 | Where the bytes come from | `Source` | `FileSource`, `BytesSource`, `ReaderSource` |
 | How bytes become a config tree | `Decoder` | `JSONDecoder`, `YAMLDecoder`, `TOMLDecoder` |
 | Which decoder reads which format | `Registry` | `DecoderRegistry` |
-| How the tree is rewritten | `Expander` | `EnvExpander` |
+| How the tree is rewritten | `Expander` | `EnvExpander`, or several with `Chain` |
 | How the tree fills a struct | `Binder` | `StructBinder` |
 | How a struct checks itself | `Validator` | your own struct |
 
@@ -85,6 +85,8 @@ reader = readin.New(                            // a realistic combination
     readin.WithEnvExpansion(readin.WithEnvStrict()),
     readin.WithTagKey("conf"),
     readin.WithKeyMatcher(readin.ExactKey),
+    readin.WithPrefix("app"),                     // one section of the document
+    readin.WithTagOption("coerce", lower),        // an option of your own
 )
 ```
 
@@ -101,6 +103,30 @@ reader.Decode(readin.NewFile("config.yaml"))   // the config tree, no struct inv
 reader.MustLoadFile("config.yaml", &cfg)           // panics instead of returning an error
 reader.MustLoadBytes(raw, readin.FormatYAML, &cfg) // the same, from embedded content
 ```
+
+### Reading one section
+
+`WithPrefix` narrows a Reader to one section of the document, so a file shared by several programs
+gives each of them its own:
+
+```go
+// config.yaml
+//   app: {name: gateway, port: 9000}
+//   worker: {name: worker, port: 9001}
+
+reader := readin.New(readin.WithPrefix("app"))
+reader.LoadFile("config.yaml", &appCfg)   // fills from the "app" section
+```
+
+The path is dotted (`app.server`) and its keys are matched like any other key, so `WithPrefix("APP")`
+finds a section written in another case unless the key matcher is `ExactKey`. The section is taken
+after the expansion, so an expander still sees the whole document.
+
+A prefix that matches nothing is an error wrapping `ErrMissingSection`: asking for a section is a
+statement about the shape of the document, and a typo that quietly loaded no configuration at all
+would be the kind of silent surprise readin exists to prevent. A section that is there but empty
+(`app: {}`) is a valid empty configuration and keeps the defaults, as does a prefix on a Reader that
+reads no file at all, since `FillDefault` has no document to look into.
 
 Applications normally depend on `readin.Loader` rather than on `*Reader`, so a test can hand out
 a fixed configuration without touching the file system:
@@ -167,6 +193,7 @@ Skip  string `json:"-"`
 | `options` | `options=debug\|info\|warn` | Closed set of values for a string field. |
 | `range` | `range=[1,65535]` | Bounds for a numeric field: `[a,b]`, `(a,b)`, `[a,b)`, `[a,)`, `(,b]`. Both bounds have to be finite: `NaN` and `Inf` are refused rather than silently accepting every value. |
 | (skip) | `-` | The field is never filled, whatever the file says. |
+| (yours) | `coerce=lower` | An option of your own, registered with `WithTagOption`: readin keeps the value and calls your handler. |
 
 The tag name is the config key; without one the Go field name is used. Keys are matched ignoring
 case and surrounding spaces, so `LogLevel` in the file fills a field tagged `logLevel`.
@@ -193,6 +220,45 @@ Quoting is also the only form that works for a backslash escape: `default=/var\,
 same to readin, but `reflect.StructTag.Get` refuses to unquote it and reports the whole tag as
 absent, so Go would hide the field's key and default. readin detects that and reports it instead
 of failing silently.
+
+### Options of your own
+
+The option set is closed on purpose: an unknown option is an error, so a typo can never turn a
+constraint into text readin ignores. `WithTagOption` is how an application extends it. readin takes
+the name on trust, keeps the value as it was written, and calls the handler once the field has a
+value:
+
+```go
+reader := readin.New(readin.WithTagOption("coerce", func(dst reflect.Value, value, path string) error {
+    if dst.Kind() == reflect.String {
+        dst.SetString(strings.ToLower(dst.String()))
+    }
+    return nil
+}))
+```
+
+```go
+Level string `json:"level,default=INFO,coerce=lower"` // filled as "info"
+```
+
+The handler is the counterpart of `options=` and `range=`: it runs where they run, i.e. only for a
+field that really got a value, on the value they were checked against (`value` is what the option
+was written with, `path` is the dotted config path an error carries). Returning an error fails the
+load with the field named. `WithBinderTagOption` is the same registration on a binder built by hand
+with `NewStructBinder`.
+
+| Refused at registration | Why |
+| --- | --- |
+| an empty name | there would be no way to write the option |
+| a name holding `,` `=` `\|` `"` `'` `[` `]` `{` `}` `(` `)` or a space | the tag grammar gives those a meaning, so the name could never be read back |
+| `default`, `env`, `required`, `options`, `range` | they are built in; redefining one would shadow a behaviour a configuration already relies on |
+| a nil handler | there would be nothing to run |
+
+A registration that is refused is reported by the next `Bind` (and so by `Load`/`LoadFile`) as an
+`ErrInvalidTag` rather than dropped, since a `BinderOption` has nowhere to return an error of its
+own. A custom option has to be written with a value (`coerce=lower`), like `default=` and
+`options=`. Options run in the order they are written in the tag, and after the built-in
+constraints.
 
 ### Precedence
 
@@ -240,6 +306,7 @@ names: they are taken from the file verbatim and no key matching is applied to t
 | `any` | the decoded value | the string |
 | struct | nested object | — |
 | `encoding.TextUnmarshaler` | string, through `UnmarshalText` | the same |
+| `json.Unmarshaler` | the value as JSON, or the string as written | the same |
 
 Overflow, a fractional value for an integer, a negative value for an unsigned field and a value
 that cannot be parsed are all errors carrying the field path — never a silent truncation. The
@@ -296,6 +363,48 @@ reader := readin.New(readin.WithEnvExpansion(readin.WithEnvStrict()))
 
 `ExpandString` is the same substitution as a standalone function, and `WithEnvLookup` replaces
 where values are read from (a map in a test, a secret store, a prefixing wrapper).
+
+A Reader holds one `Expander`, so several of them are combined with `Chain`: the tree one returns is
+handed to the next, which is how a configuration is expanded and then, say, resolved from a secret
+store.
+
+```go
+reader := readin.New(readin.WithExpander(readin.Chain(
+    readin.NewEnvExpander(readin.WithEnvStrict()),
+    mySecretExpander{},
+)))
+```
+
+## Types with their own syntax
+
+A type that knows how to read itself takes over from the tags. `encoding.TextUnmarshaler` covers a
+value written as a string, `json.Unmarshaler` covers any shape:
+
+```go
+type Level string
+
+func (l *Level) UnmarshalText(text []byte) error { /* "debug" | "info" | ... */ }
+```
+
+```go
+type Rules struct{ Allow, Deny []string }
+
+func (r *Rules) UnmarshalJSON(data []byte) error { /* a list, or a comma separated string */ }
+```
+
+A `json.Unmarshaler` is handed the value re-encoded as JSON — the one neutral text readin can
+produce whatever format the document was written in — except when the value is written as a string,
+which is handed over as it is, exactly like the text of an `env=` or `default=` option:
+
+```yaml
+rules: [allow-a, allow-b]   # the parser sees ["allow-a","allow-b"]
+rules: allow-a,allow-b      # the parser sees allow-a,allow-b
+```
+
+`encoding.TextUnmarshaler` is tried first, so a type implementing both keeps its textual form for a
+string value. A struct with a `json.Unmarshaler` still applies the `default`/`env` tags of its own
+fields when the configuration has no value for it: there is nothing to parse, and walking the fields
+is what fills them.
 
 ## Validation
 

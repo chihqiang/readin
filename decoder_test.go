@@ -102,6 +102,27 @@ func TestIsBlank(t *testing.T) {
 	}
 }
 
+func TestCanonicalDecoderMarkers(t *testing.T) {
+	// The decoders of this package say that their Decode returns a tree in the
+	// canonical shape, which is what tells the Reader that it does not have to
+	// normalise their output a second time. A decoder written outside the package
+	// cannot claim it: the method is unexported, so a claim readin cannot verify
+	// cannot be made.
+	for _, decoder := range []Decoder{NewJSONDecoder(), NewYAMLDecoder(), NewTOMLDecoder()} {
+		canonical, ok := decoder.(canonicalDecoder)
+		if !ok {
+			t.Fatalf("%T does not claim to return a canonical tree", decoder)
+		}
+		canonical.canonicalTree()
+	}
+
+	// The claim is opt-in: a decoder with no such method gets the normalisation
+	// pass, whatever it returns.
+	if _, ok := Decoder(iniDecoder{}).(canonicalDecoder); ok {
+		t.Fatal("iniDecoder claims a canonical tree without saying so")
+	}
+}
+
 func TestDecoderContract(t *testing.T) {
 	// A decoder written outside the package works through the public pipeline:
 	// register it and load with the format name it claims.

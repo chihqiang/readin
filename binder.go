@@ -3,6 +3,7 @@ package readin
 import (
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 // Binder fills a target struct from a decoded config tree.
@@ -44,6 +45,11 @@ type StructBinder struct {
 	env     LookupFunc
 	conv    *converter
 	tags    *tagCache
+	// tagOptions are the application defined tag options, fixed while the binder
+	// is built; see WithBinderTagOption. tagOptionErr reports a registration that
+	// was refused, which is held until a bind can return it.
+	tagOptions   map[string]TagOptionFunc
+	tagOptionErr error
 }
 
 // BinderOption configures a StructBinder. It is what NewStructBinder takes, so a
@@ -80,19 +86,72 @@ func WithBinderEnvLookup(fn LookupFunc) BinderOption {
 	}
 }
 
+// WithBinderTagOption registers an application defined tag option: after it, a
+// name readin does not know is no longer an error, and the handler runs once the
+// field has a value.
+//
+//	readin.NewStructBinder(readin.WithBinderTagOption("coerce", lower))
+//	// Level string `json:"level,coerce=lower"`
+//
+// The option set stays closed: only the names that were registered are accepted,
+// so a typo is still an ErrInvalidTag rather than a field that quietly keeps the
+// wrong value, and the handler is only ever called for a name readin saw at
+// registration. See TagOptionFunc for what a handler is given.
+//
+// A name that is empty, that holds a character the tag grammar uses (a comma, an
+// equals sign, a pipe, a quote, a bracket or a space) or that is one of the
+// built-in options (default, env, required, options, range) cannot be registered,
+// and neither can a nil handler. As with the other options of a binder, a
+// registration that is refused is reported by the next Bind as an ErrInvalidTag
+// rather than thrown away: BinderOption has nowhere to return an error, and a
+// silently ignored option would be exactly the kind of surprise this package
+// exists to prevent.
+func WithBinderTagOption(name string, handler TagOptionFunc) BinderOption {
+	return func(b *StructBinder) {
+		if err := b.registerTagOption(name, handler); err != nil && b.tagOptionErr == nil {
+			b.tagOptionErr = err
+		}
+	}
+}
+
+// registerTagOption adds one option to the binder, or says why it cannot be.
+func (b *StructBinder) registerTagOption(name string, handler TagOptionFunc) error {
+	if handler == nil {
+		return fmt.Errorf("%w: the option %q has no handler", ErrInvalidTag, name)
+	}
+	if name == "" {
+		return fmt.Errorf("%w: an option needs a name", ErrInvalidTag)
+	}
+	if strings.ContainsAny(name, tagOptionForbidden) {
+		return fmt.Errorf("%w: option %q cannot hold any of %q", ErrInvalidTag, name, tagOptionForbidden)
+	}
+	if isBuiltInOption(name) {
+		return fmt.Errorf("%w: option %q is built in and cannot be redefined", ErrInvalidTag, name)
+	}
+
+	if b.tagOptions == nil {
+		b.tagOptions = make(map[string]TagOptionFunc, 1)
+	}
+	b.tagOptions[name] = handler
+	return nil
+}
+
 // NewStructBinder returns the default Binder.
 func NewStructBinder(opts ...BinderOption) *StructBinder {
 	binder := &StructBinder{
 		tagKey:  defaultTagKey,
 		matcher: CaseInsensitiveKey,
 		env:     OSLookup,
-		tags:    newTagCache(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
 			opt(binder)
 		}
 	}
+	// The tag cache is built last: it is a memo of parseFieldTag, so it has to know
+	// the application defined options, and those are fixed from this point on (see
+	// the note on tagCache).
+	binder.tags = newTagCache(binder.tagOptions)
 	binder.conv = newConverter(binder)
 	return binder
 }
@@ -105,6 +164,11 @@ func NewStructBinder(opts ...BinderOption) *StructBinder {
 func (b *StructBinder) Bind(tree map[string]any, target any) error {
 	if b.tags == nil {
 		return ErrNotInitialised
+	}
+	// A tag option that could not be registered is reported here, since a
+	// BinderOption has nowhere to return an error of its own.
+	if b.tagOptionErr != nil {
+		return b.tagOptionErr
 	}
 
 	rv := reflect.ValueOf(target)
@@ -174,7 +238,11 @@ func (b *StructBinder) bindEmbedded(tree map[string]any, dst reflect.Value, path
 }
 
 // bindField fills one field from the environment, the config tree or its
-// default, and then applies the tag constraints.
+// default, and then applies the tag options: the built-in constraints and the
+// application defined handlers of the tag, in that order (see fieldTag.apply).
+//
+// tag comes from the tag cache and is read only; the entry it points into is
+// immutable, which is why it can be shared between concurrent binds.
 //
 // The precedence is: env=, config file, default=. A missing nested struct is
 // still walked so that the defaults and env= tags inside it apply; a missing
@@ -184,7 +252,7 @@ func (b *StructBinder) bindEmbedded(tree map[string]any, dst reflect.Value, path
 // were not written: the default and the nested defaults apply, an optional
 // pointer stays nil, and a `required` field is still reported as missing. A null
 // never blanks a section that a default has already filled.
-func (b *StructBinder) bindField(field reflect.StructField, dst reflect.Value, tree map[string]any, parent string, tag fieldTag) error {
+func (b *StructBinder) bindField(field reflect.StructField, dst reflect.Value, tree map[string]any, parent string, tag *fieldTag) error {
 	key := tag.key(field.Name)
 	path := joinPath(parent, key)
 
@@ -193,7 +261,7 @@ func (b *StructBinder) bindField(field reflect.StructField, dst reflect.Value, t
 			if err := b.conv.assignString(dst, raw, path); err != nil {
 				return err
 			}
-			return tag.check(dst, path)
+			return tag.apply(dst, path, b.tagOptions)
 		}
 	}
 
@@ -205,7 +273,7 @@ func (b *StructBinder) bindField(field reflect.StructField, dst reflect.Value, t
 		if err := b.conv.assign(dst, value, path); err != nil {
 			return err
 		}
-		return tag.check(dst, path)
+		return tag.apply(dst, path, b.tagOptions)
 	}
 
 	switch {
@@ -213,7 +281,7 @@ func (b *StructBinder) bindField(field reflect.StructField, dst reflect.Value, t
 		if err := b.conv.assignString(dst, tag.Default, path); err != nil {
 			return err
 		}
-		return tag.check(dst, path)
+		return tag.apply(dst, path, b.tagOptions)
 	case tag.Required:
 		return fieldError(path, fmt.Errorf("%w: no value in the config, no default= and no env=", ErrMissingField))
 	default:
@@ -236,6 +304,11 @@ func (b *StructBinder) bindNested(typ reflect.Type, dst reflect.Value, path stri
 // struct) rather than by a conversion from another value shape. time.Time and
 // types implementing encoding.TextUnmarshaler are filled from a string, so they
 // are not "bindable" even though they are structs.
+//
+// A struct implementing json.Unmarshaler stays bindable on purpose: when the
+// configuration has no value for it there is nothing to parse, and walking it is
+// what applies the defaults of the fields inside it. A value that is there is
+// handed to the type itself instead; see converter.unmarshalJSON.
 func isBindableStruct(typ reflect.Type) bool {
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
