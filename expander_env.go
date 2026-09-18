@@ -71,12 +71,20 @@ func (e *EnvExpander) expandString(s string) (string, error) {
 func (e *EnvExpander) expandMap(tree map[string]any) (map[string]any, error) {
 	expanded := make(map[string]any, len(tree))
 	for key, value := range tree {
-		newKey, err := e.expandString(key)
-		if err != nil {
-			return nil, fmt.Errorf("readin: key %q: %w", key, err)
+		// A key without "$" cannot hold a reference, so it is kept as is,
+		// skipping the function call into expandVariables.
+		var newKey string
+		if strings.Contains(key, "$") {
+			resolved, err := e.expandString(key)
+			if err != nil {
+				return nil, fmt.Errorf("readin: key %q: %w", key, err)
+			}
+			newKey = resolved
+		} else {
+			newKey = key
 		}
 		if _, duplicate := expanded[newKey]; duplicate {
-			return nil, fmt.Errorf("%w: expanding the keys of the config produced %q twice", ErrDuplicateKey, newKey)
+			return nil, newError(ErrDuplicateKey, fmt.Sprintf("expanding the keys of the config produced %q twice", newKey))
 		}
 		newValue, err := e.expandValue(value)
 		if err != nil {
@@ -91,6 +99,13 @@ func (e *EnvExpander) expandMap(tree map[string]any) (map[string]any, error) {
 func (e *EnvExpander) expandValue(value any) (any, error) {
 	switch v := value.(type) {
 	case string:
+		// A string without "$" cannot hold a reference, so it is returned as is.
+		// hasReference already scanned the whole tree for "$", but this check
+		// avoids the function call and the second strings.Contains inside
+		// expandVariables for every plain string, which is the common case.
+		if !strings.Contains(v, "$") {
+			return v, nil
+		}
 		return e.expandString(v)
 	case map[string]any:
 		return e.expandMap(v)
@@ -277,7 +292,7 @@ func resolveVariable(spec string, lookup LookupFunc, strict bool) (string, error
 		return expandVariables(fallback, lookup, strict)
 	}
 	if strict {
-		return "", fmt.Errorf("%w: %s", ErrEnvNotSet, name)
+		return "", newError(ErrEnvNotSet, name)
 	}
 	return "", nil
 }

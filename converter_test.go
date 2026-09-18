@@ -208,10 +208,13 @@ func TestConverterAssignStringErrors(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := converter.assignString(newTarget(c.dst), c.raw, "field")
+			// The field path starts with "field", but for list types it may
+			// carry an index (e.g. "field[0]"), so check the prefix.
 			if !errors.Is(err, ErrInvalidValue) {
 				t.Fatalf("assignString(%q) = %v, want ErrInvalidValue", c.raw, err)
 			}
-			if !strings.Contains(err.Error(), "field") {
+			var fe *Error
+			if !errors.As(err, &fe) || !strings.HasPrefix(fe.Field, "field") {
 				t.Fatalf("error = %v, want the field path", err)
 			}
 		})
@@ -247,12 +250,7 @@ func TestConverterAssignStringToAnInterface(t *testing.T) {
 	// from the file: readin has no way to know which implementation to build.
 	var problem error
 	bindErr := converter.assignString(reflect.ValueOf(&problem).Elem(), "boom", "problem")
-	if !errors.Is(bindErr, ErrInvalidValue) {
-		t.Fatalf("assignString(error) = %v, want ErrInvalidValue", bindErr)
-	}
-	if !strings.Contains(bindErr.Error(), "problem") {
-		t.Fatalf("error = %v, want the field path", bindErr)
-	}
+	wantFieldError(t, bindErr, ErrInvalidValue, "problem")
 }
 
 func TestConverterStructGoesThroughTheStructBinder(t *testing.T) {
@@ -279,7 +277,7 @@ func TestConverterStructGoesThroughTheStructBinder(t *testing.T) {
 	err := newConverter(fake).assign(newTarget(binderServer{}), tree, "server")
 	if err == nil || !strings.Contains(err.Error(), "nested failure") {
 		t.Fatalf("error = %v, want the nested failure", err)
-	}
+	} // TODO: this is a third-party error, strings.Contains is acceptable
 }
 
 func TestConverterAssignStructFromText(t *testing.T) {
@@ -334,12 +332,7 @@ func TestConverterTextUnmarshalerWinsOverTheKind(t *testing.T) {
 	// A failing UnmarshalText is reported against the field.
 	broken := newTarget(unmarshalerThatFails(""))
 	err := converter.assign(broken, "text", "broken")
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("error = %v, want ErrInvalidValue", err)
-	}
-	if !strings.Contains(err.Error(), "broken") {
-		t.Fatalf("error = %v, want the field path", err)
-	}
+	wantFieldError(t, err, ErrInvalidValue, "broken")
 }
 
 // unmarshalerThatFails always refuses the text it is given.
@@ -422,9 +415,7 @@ func TestConverterByteArrays(t *testing.T) {
 			t.Errorf("assign(%q) error = %v, want ErrInvalidValue", text, err)
 			continue
 		}
-		if !strings.Contains(err.Error(), "exactly 3 bytes") {
-			t.Errorf("error = %v, want it to name the length", err)
-		}
+		wantDetail(t, err, ErrInvalidValue, "exactly 3 bytes")
 	}
 
 	// An array with a named element type is filled as well: reflect.Copy would
@@ -526,9 +517,7 @@ func TestConverterMapErrorIsStable(t *testing.T) {
 		if err == nil {
 			t.Fatal("want a failure")
 		}
-		if !strings.Contains(err.Error(), "labels.a") {
-			t.Fatalf("error = %v, want the alphabetically first failing key", err)
-		}
+		wantFieldError(t, err, ErrInvalidValue, "labels.a")
 	}
 }
 
@@ -553,12 +542,7 @@ func TestConverterScalarOverflow(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := converter.assign(newTarget(c.dst), c.src, "port")
-			if !errors.Is(err, ErrInvalidValue) {
-				t.Fatalf("assign = %v, want ErrInvalidValue", err)
-			}
-			if !strings.Contains(err.Error(), c.message) {
-				t.Fatalf("error = %v, want it to say %q", err, c.message)
-			}
+			wantDetail(t, err, ErrInvalidValue, c.message)
 		})
 	}
 }
@@ -813,9 +797,11 @@ func TestToInt64RefusesValuesThatDoNotFit(t *testing.T) {
 		math.Ldexp(1, 63),
 	} {
 		_, err := toInt64(src)
-		if !errors.Is(err, ErrInvalidValue) || !strings.Contains(err.Error(), "does not fit") {
-			t.Errorf("toInt64(%v) error = %v, want it to refuse the value as out of range", src, err)
+		if !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("toInt64(%v) error = %v, want ErrInvalidValue", src, err)
+			continue
 		}
+		wantDetail(t, err, ErrInvalidValue, "does not fit")
 	}
 
 	for _, tc := range []struct {
@@ -948,23 +934,11 @@ func TestFloatToIntegerHelpers(t *testing.T) {
 }
 
 func TestOverflowValue(t *testing.T) {
-	err := overflowValue(json.Number("1e30"), "an integer")
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("error = %v, want ErrInvalidValue", err)
-	}
-	if !strings.Contains(err.Error(), "does not fit in an integer") {
-		t.Fatalf("error = %v, want it to name the target type", err)
-	}
+	wantDetail(t, overflowValue(json.Number("1e30"), "an integer"), ErrInvalidValue, "does not fit in an integer")
 }
 
 func TestNotANumber(t *testing.T) {
-	err := notANumber([]any{1})
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("error = %v, want ErrInvalidValue", err)
-	}
-	if !strings.Contains(err.Error(), "array") {
-		t.Fatalf("error = %v, want it to describe the value", err)
-	}
+	wantDetail(t, notANumber([]any{1}), ErrInvalidValue, "array")
 }
 
 // Named scalar types reach the reflect branches of the conversion helpers, which
@@ -1097,12 +1071,7 @@ func TestConverterArrayElementErrorsCarryTheIndex(t *testing.T) {
 		"not a time",
 	}, "pair")
 
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("assign = %v, want ErrInvalidValue", err)
-	}
-	if !contains(err.Error(), "pair[1]") {
-		t.Fatalf("error = %v, want the failing index", err)
-	}
+	wantFieldError(t, err, ErrInvalidValue, "pair[1]")
 }
 
 func TestConverterParseTextWithACustomStruct(t *testing.T) {
@@ -1118,12 +1087,7 @@ func TestConverterParseTextWithACustomStruct(t *testing.T) {
 
 	// A failure of the type's own parser is reported as an invalid value.
 	err := converter.parseText(newTarget(unmarshalerStruct{}), "bad")
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("error = %v, want ErrInvalidValue", err)
-	}
-	if !contains(err.Error(), "cannot parse") {
-		t.Fatalf("error = %v, want the parser message", err)
-	}
+	wantDetail(t, err, ErrInvalidValue, "cannot parse")
 
 	// A type without a textual form cannot be parsed from a string at all.
 	if err := converter.parseText(newTarget(binderServer{}), "host=example.com"); !errors.Is(err, ErrInvalidValue) {
@@ -1143,13 +1107,7 @@ func TestConverterAssignStringToAStructWithItsOwnParser(t *testing.T) {
 		t.Fatalf("dst = %+v, want the parsed value", got)
 	}
 
-	err := testConverter().assignString(newTarget(unmarshalerStruct{}), "bad", "custom")
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("error = %v, want ErrInvalidValue", err)
-	}
-	if !contains(err.Error(), "custom") {
-		t.Fatalf("error = %v, want the field path", err)
-	}
+	wantFieldError(t, testConverter().assignString(newTarget(unmarshalerStruct{}), "bad", "custom"), ErrInvalidValue, "custom")
 }
 
 // jsonStruct asks to parse itself through encoding/json, which is the hook for a
@@ -1277,12 +1235,7 @@ func TestConverterJSONUnmarshalerIsHandedTheValueAsJSON(t *testing.T) {
 func TestConverterJSONUnmarshalerFailureCarriesThePath(t *testing.T) {
 	err := testConverter().assign(newTarget(jsonFailing{}), []any{"a"}, "rules")
 
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("assign = %v, want ErrInvalidValue", err)
-	}
-	if !contains(err.Error(), "rules", "not a rule set") {
-		t.Fatalf("error = %v, want the field path and the parser message", err)
-	}
+	wantFieldDetail(t, err, ErrInvalidValue, "rules", "not a rule set")
 }
 
 func TestConverterJSONUnmarshalerWithAnUnencodableValue(t *testing.T) {
@@ -1292,12 +1245,7 @@ func TestConverterJSONUnmarshalerWithAnUnencodableValue(t *testing.T) {
 	// field it happened on.
 	err := testConverter().assign(newTarget(jsonRecorder{}), map[string]any{"f": func() {}}, "rules")
 
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("assign = %v, want ErrInvalidValue", err)
-	}
-	if !contains(err.Error(), "rules", "cannot be encoded as JSON") {
-		t.Fatalf("error = %v, want the field path and the reason", err)
-	}
+	wantFieldDetail(t, err, ErrInvalidValue, "rules", "cannot be encoded as JSON")
 }
 
 func TestConverterTextUnmarshalerBeatsJSONUnmarshaler(t *testing.T) {

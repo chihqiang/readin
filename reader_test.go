@@ -126,13 +126,8 @@ func TestReaderLoadEveryFormat(t *testing.T) {
 func TestReaderLoadUnsupportedFormat(t *testing.T) {
 	var cfg struct{}
 
-	err := New().LoadBytes([]byte("name = readin"), "ini", &cfg)
-	if !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("error = %v, want ErrUnsupportedFormat", err)
-	}
-	if !strings.Contains(err.Error(), "supported formats: json, toml, yaml") {
-		t.Fatalf("error = %v, want it to list the supported formats", err)
-	}
+	wantDetail(t, New().LoadBytes([]byte("name = readin"), "ini", &cfg),
+		ErrUnsupportedFormat, "supported formats: json, toml, yaml")
 }
 
 func TestReaderIgnoresAByteOrderMark(t *testing.T) {
@@ -581,11 +576,17 @@ func TestWithPrefixRequiresTheSection(t *testing.T) {
 			if !errors.Is(err, ErrMissingSection) {
 				t.Fatalf("LoadBytes = %v, want ErrMissingSection", err)
 			}
+			// The error wraps ErrMissingSection (which carries the prefix in
+			// Detail) and the source name (as a fmt.Errorf prefix). Both
+			// parts are visible in the rendered string, which is why the
+			// check stays on the full message.
 			if !strings.Contains(err.Error(), c.want) {
 				t.Errorf("error = %v, want it to name %s", err, c.want)
 			}
 			// The source is named, since the prefix alone does not say where the
 			// section was looked for.
+			// The source name is a fmt.Errorf prefix, not part of *Error,
+			// so strings.Contains on the full message is the right check.
 			if !strings.Contains(err.Error(), "<bytes>") {
 				t.Errorf("error = %v, want it to name the source", err)
 			}

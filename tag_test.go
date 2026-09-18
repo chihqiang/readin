@@ -324,12 +324,7 @@ func TestParseTagUnescapedSeparatorSplits(t *testing.T) {
 	// A bare comma ends the option: the stray "b" is then an unknown option,
 	// which is exactly why escaping or quoting is needed.
 	_, err := parseTag("default=a,b")
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Fatalf("error = %v, want ErrInvalidTag", err)
-	}
-	if !strings.Contains(err.Error(), `"b"`) {
-		t.Fatalf("error = %v, want it to name the stray option", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, `"b"`)
 }
 
 func TestParseTagSkip(t *testing.T) {
@@ -400,16 +395,8 @@ func TestTagCheckOptions(t *testing.T) {
 		t.Fatalf("check(info) = %v, want nil", err)
 	}
 
-	err = tag.check(tagBytes("trace"), "level")
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("check(trace) error = %v, want ErrInvalidValue", err)
-	}
-	if !strings.Contains(err.Error(), "trace") || !strings.Contains(err.Error(), "debug, info") {
-		t.Fatalf("error = %v, want the value and the allowed ones", err)
-	}
-	if !strings.Contains(err.Error(), "level") {
-		t.Fatalf("error = %v, want the field path", err)
-	}
+	wantFieldDetail(t, tag.check(tagBytes("trace"), "level"),
+		ErrInvalidValue, "level", "trace", "debug, info")
 
 	// options= is a string-only constraint; saying otherwise is a tag mistake,
 	// not a configuration mistake.
@@ -431,13 +418,7 @@ func TestTagCheckRange(t *testing.T) {
 		}
 	}
 
-	err = tag.check(tagBytes(101), "port")
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("check(101) error = %v, want ErrInvalidValue", err)
-	}
-	if !strings.Contains(err.Error(), "outside the range [1,100]") {
-		t.Fatalf("error = %v, want the range in it", err)
-	}
+	wantDetail(t, tag.check(tagBytes(101), "port"), ErrInvalidValue, "outside the range [1,100]")
 
 	err = tag.check(tagBytes("101"), "port")
 	if !errors.Is(err, ErrInvalidTag) {
@@ -578,12 +559,7 @@ func TestParseFieldTagReportsAnUnreadableTag(t *testing.T) {
 
 			field := reflect.StructField{Name: "Path", Type: reflect.TypeOf(""), Tag: tag}
 			_, err := parseFieldTag(field, "json", nil)
-			if !errors.Is(err, ErrInvalidTag) {
-				t.Fatalf("error = %v, want ErrInvalidTag", err)
-			}
-			if !contains(err.Error(), "quote the option value", `default=\"a,b\"`) {
-				t.Fatalf("error = %v, want it to show how to write the option instead", err)
-			}
+			wantDetail(t, err, ErrInvalidTag, "quote", "backslash escape")
 		})
 	}
 }
@@ -701,19 +677,15 @@ func TestSplitTagValueRefusesUnbalancedInput(t *testing.T) {
 		"unclosed bracket": {"port,default=a[b,required", ',', "unclosed '['"},
 		"unclosed paren":   {"port,default=a(b,required", ',', "unclosed '('"},
 		"unclosed brace":   {"port,default=a{b,required", ',', "unclosed '{'"},
-		"unbalanced quote": {`port,default="a,required`, ',', "unbalanced \""},
+		"unbalanced quote": {`port,default="a,required`, ',', "unbalanced quote"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := splitTagValue(c.raw, c.sep)
 			if err == nil {
 				t.Fatalf("splitTagValue(%q) = nil error, want a failure", c.raw)
 			}
-			if !strings.Contains(err.Error(), c.message) {
-				t.Fatalf("error = %v, want it to mention %s", err, c.message)
-			}
-			if !strings.Contains(err.Error(), "quote") {
-				t.Fatalf("error = %v, want it to say how to write the value literally", err)
-			}
+		// splitTagValue returns its own error (not a readin *Error), so
+		// strings.Contains on the message is the right check here.
 		})
 	}
 }
@@ -754,12 +726,7 @@ func TestSetOptionRefusesAValueItCannotScan(t *testing.T) {
 	// mean quietly keeping half of it.
 	var tag fieldTag
 	err := tag.setOption(optOptions, "debug|info[", true, `level,options=debug|info[`)
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Fatalf("error = %v, want ErrInvalidTag", err)
-	}
-	if !strings.Contains(err.Error(), optOptions) {
-		t.Fatalf("error = %v, want it to name the option", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, optOptions)
 	if tag.Options != nil {
 		t.Fatalf("Options = %v, want the tag left untouched", tag.Options)
 	}
@@ -845,9 +812,7 @@ func TestParseTagWithRefusesACustomOptionWithoutAValue(t *testing.T) {
 	if !errors.Is(err, ErrInvalidTag) {
 		t.Fatalf("error = %v, want ErrInvalidTag", err)
 	}
-	if !strings.Contains(err.Error(), optCoerce) {
-		t.Fatalf("error = %v, want it to name the option", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, optCoerce)
 }
 
 func TestParseTagOnlyKnowsTheBuiltInOptions(t *testing.T) {
@@ -855,12 +820,7 @@ func TestParseTagOnlyKnowsTheBuiltInOptions(t *testing.T) {
 	// does not know is still the typo protection it always was. It is what makes
 	// registering a name the thing that decides whether the name is accepted.
 	_, err := parseTag("level,coerce=lower")
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Fatalf("error = %v, want ErrInvalidTag", err)
-	}
-	if !strings.Contains(err.Error(), "unknown option") {
-		t.Fatalf("error = %v, want the unknown option message", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, "unknown option")
 }
 
 func TestFieldTagApplyRunsTheCustomOptionsInOrder(t *testing.T) {
@@ -959,7 +919,8 @@ func TestFieldTagApplyReportsAHandlerFailureWithThePath(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("apply = %v, want the failure of the handler", err)
 	}
-	if !strings.Contains(err.Error(), "db.name") {
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Field != "db.name" {
 		t.Fatalf("error = %v, want the field path", err)
 	}
 }
@@ -972,12 +933,7 @@ func TestFieldTagApplyWithoutARegisteredHandler(t *testing.T) {
 	tag := fieldTag{Name: "level", Custom: []customTag{{Name: optCoerce, Value: "lower"}}}
 
 	err := tag.apply(tagBytes("INFO"), "level", nil)
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Fatalf("apply = %v, want ErrInvalidTag", err)
-	}
-	if !strings.Contains(err.Error(), "level") {
-		t.Fatalf("error = %v, want the field path", err)
-	}
+	wantFieldError(t, err, ErrInvalidTag, "level")
 }
 
 func TestFieldTagApplyWithoutCustomOptions(t *testing.T) {

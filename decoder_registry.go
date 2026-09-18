@@ -86,7 +86,7 @@ func (r *DecoderRegistry) snapshot() *registryState {
 // stored, so a refused decoder leaves the registry exactly as it was.
 func (r *DecoderRegistry) Register(decoder Decoder) error {
 	if decoder == nil || decoder.Format() == "" {
-		return fmt.Errorf("%w: %T", ErrNilDecoder, decoder)
+		return newError(ErrNilDecoder, fmt.Sprintf("%T", decoder))
 	}
 
 	keys := make([]string, 0, 1+len(decoder.Extensions()))
@@ -104,7 +104,7 @@ func (r *DecoderRegistry) Register(decoder Decoder) error {
 
 	for _, key := range keys {
 		if existing, ok := current.decoders[key]; ok {
-			return fmt.Errorf("%w: %q is taken by the %s decoder", ErrDuplicateDecoder, key, existing.Format())
+			return newError(ErrDuplicateDecoder, fmt.Sprintf("%q is taken by the %s decoder", key, existing.Format()))
 		}
 	}
 
@@ -140,11 +140,11 @@ func (r *DecoderRegistry) Lookup(format string) (Decoder, error) {
 		return decoder, nil
 	}
 	if key == "" {
-		return nil, fmt.Errorf("%w: cannot tell the format of the content, supported formats: %s",
-			ErrUnsupportedFormat, supportedFormats(state.formats))
+		return nil, newError(ErrUnsupportedFormat, fmt.Sprintf("cannot tell the format of the content, supported formats: %s",
+			supportedFormats(state.formats)))
 	}
-	return nil, fmt.Errorf("%w: %q, supported formats: %s",
-		ErrUnsupportedFormat, format, supportedFormats(state.formats))
+return nil, newError(ErrUnsupportedFormat, fmt.Sprintf("%q, supported formats: %s",
+			format, supportedFormats(state.formats)))
 }
 
 // supportedFormats renders the registered format names for an error message. An
@@ -169,17 +169,31 @@ func normalizeFormat(format string) string {
 }
 
 // matchesFormat reports whether decoder claims the given format name or file
-// extension.
+// extension. The format is normalised once by the caller, so this function is
+// a tight loop of string comparisons over the decoder's format and extensions.
 func matchesFormat(decoder Decoder, format string) bool {
 	key := normalizeFormat(format)
 	if key == "" {
 		return false
 	}
-	if normalizeFormat(decoder.Format()) == key {
+	return decoderMatchesKey(decoder, key)
+}
+
+// decoderMatchesKey reports whether decoder claims the given normalised key.
+// It is the inner loop of matchesFormat without the normalisation, so callers
+// that already have a normalised key do not pay for it again.
+//
+// A fast path checks the raw format and extensions first: the built-in decoders
+// (and most third party ones) already return lower-case names without a leading
+// dot, so normalizeFormat would be a no-op on them. Calling it is therefore
+// deferred to the fallback, which is only reached when the raw value is not
+// already equal to the normalised key.
+func decoderMatchesKey(decoder Decoder, key string) bool {
+	if format := decoder.Format(); format == key || normalizeFormat(format) == key {
 		return true
 	}
 	for _, ext := range decoder.Extensions() {
-		if normalizeFormat(ext) == key {
+		if ext == key || normalizeFormat(ext) == key {
 			return true
 		}
 	}

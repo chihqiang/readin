@@ -65,12 +65,7 @@ func TestSourceUnknownFormatIsReported(t *testing.T) {
 		Name string `json:"name"`
 	}
 	err := New().Load(source, &cfg)
-	if !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("error = %v, want ErrUnsupportedFormat", err)
-	}
-	if !strings.Contains(err.Error(), "cannot tell the format") {
-		t.Fatalf("error = %v, want the unknown-format wording", err)
-	}
+	wantDetail(t, err, ErrUnsupportedFormat, "cannot tell the format")
 }
 
 func TestSourceIsNotReadTwice(t *testing.T) {

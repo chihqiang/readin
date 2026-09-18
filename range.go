@@ -29,17 +29,17 @@ type numericRange struct {
 func parseRange(s string) (*numericRange, error) {
 	text := strings.TrimSpace(s)
 	if len(text) < 2 {
-		return nil, fmt.Errorf("range %q must be written like [0,100]", s)
+		return nil, newError(ErrInvalidTag, fmt.Sprintf("range %q must be written like [0,100]", s))
 	}
 
 	left, right := text[0], text[len(text)-1]
 	if (left != '[' && left != '(') || (right != ']' && right != ')') {
-		return nil, fmt.Errorf("range %q must start with [ or ( and end with ] or )", s)
+		return nil, newError(ErrInvalidTag, fmt.Sprintf("range %q must start with [ or ( and end with ] or )", s))
 	}
 
 	lower, upper, found := strings.Cut(text[1:len(text)-1], ",")
 	if !found {
-		return nil, fmt.Errorf("range %q must hold two bounds separated by a comma", s)
+		return nil, newError(ErrInvalidTag, fmt.Sprintf("range %q must hold two bounds separated by a comma", s))
 	}
 
 	parsed := &numericRange{MinInclude: left == '[', MaxInclude: right == ']'}
@@ -59,7 +59,7 @@ func parseRange(s string) (*numericRange, error) {
 	}
 
 	if parsed.MinSet && parsed.MaxSet && parsed.Max < parsed.Min {
-		return nil, fmt.Errorf("range %q: the upper bound is smaller than the lower bound", s)
+		return nil, newError(ErrInvalidTag, fmt.Sprintf("range %q: the upper bound is smaller than the lower bound", s))
 	}
 	return parsed, nil
 }
@@ -71,10 +71,10 @@ func parseRange(s string) (*numericRange, error) {
 func parseBound(bound, raw string) (float64, error) {
 	value, err := strconv.ParseFloat(bound, 64)
 	if err != nil {
-		return 0, fmt.Errorf("range %q: %q is not a number", raw, bound)
+		return 0, newError(ErrInvalidTag, fmt.Sprintf("range %q: %q is not a number", raw, bound))
 	}
 	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, fmt.Errorf("range %q: %q must be a finite number", raw, bound)
+		return 0, newError(ErrInvalidTag, fmt.Sprintf("range %q: %q must be a finite number", raw, bound))
 	}
 	return value, nil
 }

@@ -117,16 +117,16 @@ func WithBinderTagOption(name string, handler TagOptionFunc) BinderOption {
 // registerTagOption adds one option to the binder, or says why it cannot be.
 func (b *StructBinder) registerTagOption(name string, handler TagOptionFunc) error {
 	if handler == nil {
-		return fmt.Errorf("%w: the option %q has no handler", ErrInvalidTag, name)
+		return newError(ErrInvalidTag, fmt.Sprintf("the option %q has no handler", name))
 	}
 	if name == "" {
-		return fmt.Errorf("%w: an option needs a name", ErrInvalidTag)
+		return newError(ErrInvalidTag, "an option needs a name")
 	}
 	if strings.ContainsAny(name, tagOptionForbidden) {
-		return fmt.Errorf("%w: option %q cannot hold any of %q", ErrInvalidTag, name, tagOptionForbidden)
+		return newError(ErrInvalidTag, fmt.Sprintf("option %q cannot hold any of %q", name, tagOptionForbidden))
 	}
 	if isBuiltInOption(name) {
-		return fmt.Errorf("%w: option %q is built in and cannot be redefined", ErrInvalidTag, name)
+		return newError(ErrInvalidTag, fmt.Sprintf("option %q is built in and cannot be redefined", name))
 	}
 
 	if b.tagOptions == nil {
@@ -173,12 +173,12 @@ func (b *StructBinder) Bind(tree map[string]any, target any) error {
 
 	rv := reflect.ValueOf(target)
 	if !rv.IsValid() || rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return fmt.Errorf("%w: got %T", ErrNilTarget, target)
+		return newError(ErrNilTarget, fmt.Sprintf("got %T", target))
 	}
 
 	dst := rv.Elem()
 	if dst.Kind() != reflect.Struct {
-		return fmt.Errorf("%w: got %T", ErrTargetNotStruct, target)
+		return newError(ErrTargetNotStruct, fmt.Sprintf("got %T", target))
 	}
 
 	return b.bindStruct(tree, dst, "")
@@ -221,7 +221,7 @@ func (b *StructBinder) bindStruct(tree map[string]any, dst reflect.Value, path s
 	// the error points at the section whose rule failed ("log") rather than at a
 	// single field, which is the most a cross-field rule can say about itself.
 	if err := validate(dst.Addr().Interface()); err != nil {
-		return fieldError(path, err)
+		return fieldError(path, wrapInvalidValue(err))
 	}
 	return nil
 }
@@ -283,7 +283,7 @@ func (b *StructBinder) bindField(field reflect.StructField, dst reflect.Value, t
 		}
 		return tag.apply(dst, path, b.tagOptions)
 	case tag.Required:
-		return fieldError(path, fmt.Errorf("%w: no value in the config, no default= and no env=", ErrMissingField))
+		return fieldError(path, newError(ErrMissingField, "no value in the config, no default= and no env="))
 	default:
 		return b.bindNested(field.Type, dst, path)
 	}

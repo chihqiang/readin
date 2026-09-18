@@ -51,6 +51,6 @@ func lookupKey(tree map[string]any, key string, matcher KeyMatcher) (any, bool, 
 		return value, true, nil
 	default:
 		sort.Strings(matches)
-		return nil, false, fmt.Errorf("%w: %q matches %s", ErrDuplicateKey, key, strings.Join(matches, ", "))
+		return nil, false, newError(ErrDuplicateKey, fmt.Sprintf("%q matches %s", key, strings.Join(matches, ", ")))
 	}
 }

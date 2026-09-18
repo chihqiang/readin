@@ -2,7 +2,6 @@ package readin
 
 import (
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -61,9 +60,7 @@ func TestParseRangeRefusesNonFiniteBounds(t *testing.T) {
 	// A NaN bound would make every comparison false, so the range would accept
 	// anything at all instead of constraining the field.
 	_, err := parseRange("[nan,10]")
-	if err == nil || !strings.Contains(err.Error(), "finite") {
-		t.Fatalf("error = %v, want it to ask for a finite bound", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, "finite")
 }
 
 func TestRangeContainsWithoutBounds(t *testing.T) {
@@ -149,28 +146,28 @@ func TestRangeInTag(t *testing.T) {
 
 	if _, err := parseTag("port,range=1-100"); err == nil {
 		t.Fatal("a broken range in a tag = nil error, want a failure")
-	} else if !strings.Contains(err.Error(), "range") {
-		t.Fatalf("error = %v, want it to name the option", err)
+	} else {
+		wantDetail(t, err, ErrInvalidTag, "range")
 	}
 }
 
 func TestRangeErrorMessages(t *testing.T) {
 	if _, err := parseRange("[2,1]"); err == nil {
 		t.Fatal("want a failure")
-	} else if !strings.Contains(err.Error(), "upper bound") {
-		t.Fatalf("error = %v, want it to explain the problem", err)
+	} else {
+		wantDetail(t, err, ErrInvalidTag, "upper bound")
 	}
 
 	if _, err := parseRange("1,2"); err == nil {
 		t.Fatal("want a failure")
-	} else if !strings.Contains(err.Error(), "must start with") {
-		t.Fatalf("error = %v, want it to show the expected shape", err)
+	} else {
+		wantDetail(t, err, ErrInvalidTag, "must start with")
 	}
 
 	if _, err := parseRange("[a,b]"); err == nil {
 		t.Fatal("want a failure")
-	} else if !strings.Contains(err.Error(), "is not a number") {
-		t.Fatalf("error = %v, want it to name the offending bound", err)
+	} else {
+		wantDetail(t, err, ErrInvalidTag, "is not a number")
 	}
 }
 

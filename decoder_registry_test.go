@@ -3,7 +3,6 @@ package readin
 import (
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -62,17 +61,10 @@ func TestRegistryLookupUnknownFormat(t *testing.T) {
 	registry := NewDefaultRegistry()
 
 	_, err := registry.Lookup("ini")
-	if !errors.Is(err, ErrUnsupportedFormat) {
-		t.Fatalf("error = %v, want ErrUnsupportedFormat", err)
-	}
-	if !strings.Contains(err.Error(), "supported formats: json, toml, yaml") {
-		t.Fatalf("error = %v, want it to list what is supported", err)
-	}
+	wantDetail(t, err, ErrUnsupportedFormat, "supported formats: json, toml, yaml")
 
 	_, err = registry.Lookup("")
-	if !errors.Is(err, ErrUnsupportedFormat) || !strings.Contains(err.Error(), "cannot tell the format") {
-		t.Fatalf("empty format error = %v, want the unknown-format wording", err)
-	}
+	wantDetail(t, err, ErrUnsupportedFormat, "cannot tell the format")
 }
 
 func TestRegistryZeroValueIsAnEmptyRegistry(t *testing.T) {
@@ -87,9 +79,7 @@ func TestRegistryZeroValueIsAnEmptyRegistry(t *testing.T) {
 	if !errors.Is(err, ErrUnsupportedFormat) {
 		t.Fatalf("Lookup error = %v, want ErrUnsupportedFormat", err)
 	}
-	if !strings.Contains(err.Error(), "supported formats: none") {
-		t.Fatalf("error = %v, want it to say that no format is registered", err)
-	}
+	wantDetail(t, err, ErrUnsupportedFormat, "supported formats: none")
 
 	// It can be filled like any other registry.
 	if err := registry.Register(NewYAMLDecoder()); err != nil {
@@ -138,12 +128,7 @@ func TestRegistryRejectsAForeignExtension(t *testing.T) {
 	registry := NewRegistry(NewJSONDecoder())
 
 	err := registry.Register(&stubDecoder{format: "mine", extensions: []string{".json"}})
-	if !errors.Is(err, ErrDuplicateDecoder) {
-		t.Fatalf("error = %v, want ErrDuplicateDecoder", err)
-	}
-	if !strings.Contains(err.Error(), "json") {
-		t.Fatalf("error = %v, want it to name the clashing key", err)
-	}
+	wantDetail(t, err, ErrDuplicateDecoder, "json")
 
 	// A failed Register must leave the registry usable.
 	if _, err := registry.Lookup("json"); err != nil {

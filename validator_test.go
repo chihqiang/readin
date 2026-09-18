@@ -57,9 +57,12 @@ func TestValidateValueReceiver(t *testing.T) {
 	}
 
 	err := validate(validatorValue{})
-	if err == nil || !strings.Contains(err.Error(), "port must be set") {
-		t.Fatalf("error = %v, want the validator message", err)
+	if err == nil {
+		t.Fatal("want a failure")
 	}
+	if !strings.Contains(err.Error(), "port must be set") {
+		t.Fatalf("error = %v, want the validator message", err)
+	} // validate returns the raw Validate() error, no *Error wrapping
 
 	// A pointer to the value finds the value receiver method as well.
 	if err := validate(&validatorValue{Port: 1}); err != nil {
@@ -91,11 +94,21 @@ func TestValidateIsCalledThroughBinding(t *testing.T) {
 	}
 
 	err := bindYAML(t, "server:\n  port: 0\n", &cfg)
-	if err == nil || !strings.Contains(err.Error(), "port must be set") {
-		t.Fatalf("error = %v, want the nested validator to run", err)
+	if err == nil {
+		t.Fatal("want a failure")
 	}
-	if !strings.Contains(err.Error(), "server") {
+	// The validator's raw error (errors.New) is wrapped by wrapInvalidValue
+	// as *Error with Kind=ErrInvalidValue and the validator's message in
+	// Detail. errors.Is can reach both ErrInvalidValue and the field path.
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Field != "server" {
 		t.Fatalf("error = %v, want the section path", err)
+	}
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue", err)
+	}
+	if !strings.Contains(fe.Detail, "port must be set") {
+		t.Fatalf("error = %v, want the validator message", err)
 	}
 
 	if err := bindYAML(t, "server:\n  port: 8080\n", &cfg); err != nil {
@@ -109,7 +122,19 @@ func TestValidateOnTheRootHasNoPath(t *testing.T) {
 	root := rootValidator{}
 	err := NewStructBinder().Bind(emptyTree(), &root)
 
-	if err == nil || !strings.Contains(err.Error(), "root rejected") {
+	if err == nil {
+		t.Fatal("want a failure")
+	}
+	// The root struct has no path, so fieldError is a no-op. The *Error from
+	// wrapInvalidValue is returned as-is, with no Field set.
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Field != "" {
+		t.Fatalf("error = %v, want no field path", err)
+	}
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue", err)
+	}
+	if !strings.Contains(fe.Detail, "root rejected") {
 		t.Fatalf("error = %v, want the validator message", err)
 	}
 	if strings.Contains(err.Error(), `field ""`) {
@@ -140,7 +165,18 @@ func TestValidateThroughTheWholePipeline(t *testing.T) {
 	// configuration that was filled but not accepted.
 	broken := binderLimit{}
 	err = New().LoadBytes([]byte("max: 0\n"), FormatYAML, &broken)
-	if err == nil || !strings.Contains(err.Error(), "max must be positive") {
-		t.Fatalf("error = %v, want the validator failure", err)
+	if err == nil {
+		t.Fatal("want the validator failure")
+	}
+	// The validator error is wrapped by wrapInvalidValue (Kind=ErrInvalidValue,
+	// Detail="max must be positive"). Since binderLimit is the root struct
+	// (path ""), fieldError is a no-op, but the *Error from wrapInvalidValue
+	// survives through reader.Decode's fmt.Errorf("%s: %w", ...).
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue", err)
+	}
+	var fe *Error
+	if !errors.As(err, &fe) || !strings.Contains(fe.Detail, "max must be positive") {
+		t.Fatalf("error = %v, want the validator message in the detail", err)
 	}
 }

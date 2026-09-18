@@ -131,8 +131,8 @@ func (c *converter) assignString(dst reflect.Value, raw, path string) error {
 func (c *converter) assignBytes(dst reflect.Value, text, path string) error {
 	if dst.Kind() == reflect.Array {
 		if dst.Len() != len(text) {
-			return fieldError(path, fmt.Errorf("%w: %s needs exactly %d bytes, got %d",
-				ErrInvalidValue, dst.Type(), dst.Len(), len(text)))
+			return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%s needs exactly %d bytes, got %d",
+				dst.Type(), dst.Len(), len(text))))
 		}
 		// SetUint element by element rather than reflect.Copy: a named element
 		// type ([N]Byte) is not assignable from []byte, but it is settable.
@@ -220,8 +220,8 @@ func (c *converter) assignSlice(dst reflect.Value, src any, path string) error {
 func (c *converter) assignItems(dst reflect.Value, items []any, path string) error {
 	if dst.Kind() == reflect.Array {
 		if len(items) != dst.Len() {
-			return fieldError(path, fmt.Errorf("%w: %s needs exactly %d items, got %d",
-				ErrInvalidValue, dst.Type(), dst.Len(), len(items)))
+			return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%s needs exactly %d items, got %d",
+				dst.Type(), dst.Len(), len(items))))
 		}
 		for i, item := range items {
 			if err := c.assign(dst.Index(i), item, indexPath(path, i)); err != nil {
@@ -253,16 +253,22 @@ func (c *converter) assignMap(dst reflect.Value, src any, path string) error {
 		return invalidValue(src, dst.Type(), path)
 	}
 	if dst.Type().Key().Kind() != reflect.String {
-		return fieldError(path, fmt.Errorf("%w: only string keyed maps can be filled, got %s", ErrInvalidValue, dst.Type()))
+		return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("only string keyed maps can be filled, got %s", dst.Type())))
 	}
 
 	filled := reflect.MakeMapWithSize(dst.Type(), len(tree))
+	keyType := dst.Type().Key()
+	needConvert := keyType != reflect.TypeOf("")
 	for _, key := range sortedKeys(tree) {
 		value := reflect.New(dst.Type().Elem()).Elem()
 		if err := c.assign(value, tree[key], joinPath(path, key)); err != nil {
 			return err
 		}
-		filled.SetMapIndex(reflect.ValueOf(key).Convert(dst.Type().Key()), value)
+		kv := reflect.ValueOf(key)
+		if needConvert {
+			kv = kv.Convert(keyType)
+		}
+		filled.SetMapIndex(kv, value)
 	}
 	dst.Set(filled)
 	return nil
@@ -296,7 +302,7 @@ func (c *converter) assignScalar(dst reflect.Value, src any, path string) error 
 			return fieldError(path, err)
 		}
 		if dst.OverflowFloat(value) {
-			return fieldError(path, fmt.Errorf("%w: %v overflows %s", ErrInvalidValue, value, dst.Type()))
+			return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%v overflows %s", value, dst.Type())))
 		}
 		dst.SetFloat(value)
 		return nil
@@ -323,7 +329,7 @@ func (c *converter) assignInt(dst reflect.Value, src any, path string) error {
 		return fieldError(path, err)
 	}
 	if dst.OverflowInt(value) {
-		return fieldError(path, fmt.Errorf("%w: %d overflows %s", ErrInvalidValue, value, dst.Type()))
+		return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%d overflows %s", value, dst.Type())))
 	}
 	dst.SetInt(value)
 	return nil
@@ -336,7 +342,7 @@ func (c *converter) assignUint(dst reflect.Value, src any, path string) error {
 		return fieldError(path, err)
 	}
 	if dst.OverflowUint(value) {
-		return fieldError(path, fmt.Errorf("%w: %d overflows %s", ErrInvalidValue, value, dst.Type()))
+		return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%d overflows %s", value, dst.Type())))
 	}
 	dst.SetUint(value)
 	return nil
@@ -356,7 +362,7 @@ func (c *converter) parseText(dst reflect.Value, text string) error {
 	if handled, err := c.unmarshalText(dst, text, ""); handled {
 		return err
 	}
-	return fmt.Errorf("%w: %s cannot be parsed from the string %q", ErrInvalidValue, dst.Type(), text)
+	return newError(ErrInvalidValue, fmt.Sprintf("%s cannot be parsed from the string %q", dst.Type(), text))
 }
 
 // unmarshalText lets a type read itself out of a string, through its own
@@ -375,8 +381,8 @@ func (c *converter) unmarshalText(dst reflect.Value, text, path string) (bool, e
 		return false, nil
 	}
 	if err := unmarshaler.UnmarshalText([]byte(text)); err != nil {
-		return true, fieldError(path, fmt.Errorf("%w: %q cannot be parsed as %s: %v",
-			ErrInvalidValue, text, dst.Type(), err))
+		return true, fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%q cannot be parsed as %s: %v",
+			text, dst.Type(), err)))
 	}
 	return true, nil
 }
@@ -413,15 +419,15 @@ func (c *converter) unmarshalJSON(dst reflect.Value, src any, path string) (bool
 	if !isText {
 		encoded, err := json.Marshal(src)
 		if err != nil {
-			return true, fieldError(path, fmt.Errorf("%w: the %s cannot be encoded as JSON for %s: %v",
-				ErrInvalidValue, kindOf(src), dst.Type(), err))
+return true, fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("the %s cannot be encoded as JSON for %s: %v",
+			kindOf(src), dst.Type(), err)))
 		}
 		data = string(encoded)
 	}
 
 	if err := unmarshaler.UnmarshalJSON([]byte(data)); err != nil {
-		return true, fieldError(path, fmt.Errorf("%w: the %s cannot be parsed as %s: %v",
-			ErrInvalidValue, kindOf(src), dst.Type(), err))
+		return true, fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("the %s cannot be parsed as %s: %v",
+			kindOf(src), dst.Type(), err)))
 	}
 	return true, nil
 }
@@ -434,7 +440,7 @@ func parseTime(text string) (time.Time, error) {
 			return parsed, nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("%w: %q is not a time such as %q", ErrInvalidValue, text, time.RFC3339)
+	return time.Time{}, newError(ErrInvalidValue, fmt.Sprintf("%q is not a time such as %q", text, time.RFC3339))
 }
 
 // implementsTextUnmarshaler reports whether typ implements
@@ -489,7 +495,7 @@ func toText(src any) (string, error) {
 	case reflect.Float32, reflect.Float64:
 		return strconv.FormatFloat(rv.Float(), 'f', -1, rv.Type().Bits()), nil
 	default:
-		return "", fmt.Errorf("%w: %s cannot be used as a string", ErrInvalidValue, kindOf(src))
+		return "", newError(ErrInvalidValue, fmt.Sprintf("%s cannot be used as a string", kindOf(src)))
 	}
 }
 
@@ -509,7 +515,7 @@ func toBool(src any) (bool, error) {
 		if parsed, err := strconv.ParseBool(strings.TrimSpace(v)); err == nil {
 			return parsed, nil
 		}
-		return false, fmt.Errorf("%w: %q is not a boolean", ErrInvalidValue, v)
+		return false, newError(ErrInvalidValue, fmt.Sprintf("%q is not a boolean", v))
 	case json.Number:
 		if number, err := v.Int64(); err == nil {
 			switch number {
@@ -520,7 +526,7 @@ func toBool(src any) (bool, error) {
 			}
 		}
 	}
-	return false, fmt.Errorf("%w: %s cannot be used as a boolean", ErrInvalidValue, kindOf(src))
+	return false, newError(ErrInvalidValue, fmt.Sprintf("%s cannot be used as a boolean", kindOf(src)))
 }
 
 // toInt64 converts a decoded value into an int64.
@@ -669,7 +675,7 @@ func toDuration(src any) (time.Duration, error) {
 	if text, ok := src.(string); ok {
 		duration, err := time.ParseDuration(strings.TrimSpace(text))
 		if err != nil {
-			return 0, fmt.Errorf("%w: %q is not a duration such as 5s or 1m30s", ErrInvalidValue, text)
+			return 0, newError(ErrInvalidValue, fmt.Sprintf("%q is not a duration such as 5s or 1m30s", text))
 		}
 		return duration, nil
 	}
@@ -688,7 +694,7 @@ func toDuration(src any) (time.Duration, error) {
 // value that high is refused instead of being silently clamped by the hardware.
 func floatToInt64(value float64, src any) (int64, error) {
 	if value != math.Trunc(value) {
-		return 0, fmt.Errorf("%w: %v has a fractional part", ErrInvalidValue, src)
+		return 0, newError(ErrInvalidValue, fmt.Sprintf("%v has a fractional part", src))
 	}
 	if value >= math.MaxInt64 || value < math.MinInt64 {
 		return 0, overflowValue(src, "an integer")
@@ -701,7 +707,7 @@ func floatToInt64(value float64, src any) (int64, error) {
 // rounds to 2^64.
 func floatToUint64(value float64, src any) (uint64, error) {
 	if value != math.Trunc(value) {
-		return 0, fmt.Errorf("%w: %v has a fractional part", ErrInvalidValue, src)
+		return 0, newError(ErrInvalidValue, fmt.Sprintf("%v has a fractional part", src))
 	}
 	if value < 0 || value >= math.MaxUint64 {
 		return 0, overflowValue(src, "an unsigned integer")
@@ -711,17 +717,17 @@ func floatToUint64(value float64, src any) (uint64, error) {
 
 // notANumber reports a value that is not a number.
 func notANumber(src any) error {
-	return fmt.Errorf("%w: %s is not a number", ErrInvalidValue, kindOf(src))
+	return newError(ErrInvalidValue, fmt.Sprintf("%s is not a number", kindOf(src)))
 }
 
 // negativeValue reports a negative value that an unsigned field cannot hold.
 func negativeValue(src any) error {
-	return fmt.Errorf("%w: %v is negative and the field is unsigned", ErrInvalidValue, src)
+	return newError(ErrInvalidValue, fmt.Sprintf("%v is negative and the field is unsigned", src))
 }
 
 // overflowValue reports a whole number that is too large for the field it is
 // being read into. It is never a silent truncation or a platform dependent
 // saturation.
 func overflowValue(src any, typ string) error {
-	return fmt.Errorf("%w: %v does not fit in %s", ErrInvalidValue, src, typ)
+	return newError(ErrInvalidValue, fmt.Sprintf("%v does not fit in %s", src, typ))
 }

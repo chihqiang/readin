@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 )
 
 // defaultTagKey is the struct tag the default StructBinder reads; WithTagKey (or
@@ -291,11 +292,9 @@ func tagValue(tag reflect.StructTag, key string) (string, error) {
 		return value, nil
 	}
 	if raw := unreadableTagValue(string(tag), key); raw != "" {
-		return "", fmt.Errorf("%w: reflect cannot read the %s tag %q: a backslash escape is not valid "+
-			"inside a Go string literal, so reflect hides the whole tag and the field would lose both "+
-			"its config key and its default; quote the option value instead, i.e. write \\\" around it "+
-			"(default=\\\"a,b\\\")",
-			ErrInvalidTag, key, raw)
+		return "", newError(ErrInvalidTag, fmt.Sprintf("the %s tag has a backslash escape (%q); "+
+			`quote the value instead, e.g. default="a,b"`,
+			key, raw))
 	}
 	return "", nil
 }
@@ -379,7 +378,7 @@ func parseTagWith(raw string, custom map[string]TagOptionFunc) (fieldTag, error)
 
 	segments, err := splitTagValue(raw, tagSegmentSeparator)
 	if err != nil {
-		return fieldTag{}, fmt.Errorf("%w: %v", ErrInvalidTag, err)
+		return fieldTag{}, newError(ErrInvalidTag, err.Error())
 	}
 	tag.Name = segments[0]
 
@@ -388,10 +387,10 @@ func parseTagWith(raw string, custom map[string]TagOptionFunc) (fieldTag, error)
 		name, value, hasValue := strings.Cut(segment, tagOptionSeparator)
 		name = strings.TrimSpace(name)
 		if name == "" {
-			return fieldTag{}, fmt.Errorf("%w: empty option in %q", ErrInvalidTag, raw)
+			return fieldTag{}, newError(ErrInvalidTag, fmt.Sprintf("empty option in %q", raw))
 		}
 		if _, duplicate := seen[name]; duplicate {
-			return fieldTag{}, fmt.Errorf("%w: option %q appears twice in %q", ErrInvalidTag, name, raw)
+			return fieldTag{}, newError(ErrInvalidTag, fmt.Sprintf("option %q appears twice in %q", name, raw))
 		}
 		seen[name] = struct{}{}
 
@@ -401,8 +400,8 @@ func parseTagWith(raw string, custom map[string]TagOptionFunc) (fieldTag, error)
 			// nothing registered never looks anything up.
 			if _, registered := custom[name]; registered {
 				if !hasValue {
-					return fieldTag{}, fmt.Errorf("%w: option %q needs a value in %q, e.g. %s=<value>",
-						ErrInvalidTag, name, raw, name)
+return fieldTag{}, newError(ErrInvalidTag, fmt.Sprintf("option %q needs a value in %q, e.g. %s=<value>",
+			name, raw, name))
 				}
 				tag.Custom = append(tag.Custom, customTag{Name: name, Value: value})
 				continue
@@ -436,7 +435,7 @@ func (t *fieldTag) setOption(name, value string, hasValue bool, raw string) erro
 			t.Required = true
 			return nil
 		default:
-			return fmt.Errorf("%w: option %q needs a value in %q", ErrInvalidTag, name, raw)
+			return newError(ErrInvalidTag, fmt.Sprintf("option %q needs a value in %q", name, raw))
 		}
 	}
 
@@ -445,15 +444,15 @@ func (t *fieldTag) setOption(name, value string, hasValue bool, raw string) erro
 		t.Default, t.HasDefault = value, true
 	case optEnv:
 		if value = strings.TrimSpace(value); value == "" {
-			return fmt.Errorf("%w: option %q needs a variable name in %q", ErrInvalidTag, optEnv, raw)
+			return newError(ErrInvalidTag, fmt.Sprintf("option %q needs a variable name in %q", optEnv, raw))
 		}
 		t.Env = value
 	case optRequired:
-		return fmt.Errorf("%w: option %q takes no value in %q", ErrInvalidTag, optRequired, raw)
+		return newError(ErrInvalidTag, fmt.Sprintf("option %q takes no value in %q", optRequired, raw))
 	case optOptions:
 		values, err := splitTagValue(value, tagListSeparator)
 		if err != nil {
-			return fmt.Errorf("%w: option %q: %v", ErrInvalidTag, optOptions, err)
+			return newError(ErrInvalidTag, fmt.Sprintf("option %q: %v", optOptions, err))
 		}
 		options := make([]string, 0, len(values))
 		for _, option := range values {
@@ -462,17 +461,17 @@ func (t *fieldTag) setOption(name, value string, hasValue bool, raw string) erro
 			}
 		}
 		if len(options) == 0 {
-			return fmt.Errorf("%w: option %q needs at least one value in %q", ErrInvalidTag, optOptions, raw)
+			return newError(ErrInvalidTag, fmt.Sprintf("option %q needs at least one value in %q", optOptions, raw))
 		}
 		t.Options = options
 	case optRange:
 		parsed, err := parseRange(value)
 		if err != nil {
-			return fmt.Errorf("%w: option %q: %v", ErrInvalidTag, optRange, err)
+			return newError(ErrInvalidTag, fmt.Sprintf("option %q: %v", optRange, err))
 		}
 		t.Range = parsed
 	default:
-		return fmt.Errorf("%w: unknown option %q in %q", ErrInvalidTag, name, raw)
+		return newError(ErrInvalidTag, fmt.Sprintf("unknown option %q in %q", name, raw))
 	}
 	return nil
 }
@@ -539,10 +538,10 @@ func (t fieldTag) runCustom(value reflect.Value, path string, custom map[string]
 			// belongs to that binder. It is reported rather than skipped, so an
 			// inconsistency can never hide as a field that quietly kept the wrong
 			// value.
-			return fieldError(path, fmt.Errorf("%w: option %q has no handler registered", ErrInvalidTag, option.Name))
+			return fieldError(path, newError(ErrInvalidTag, fmt.Sprintf("option %q has no handler registered", option.Name)))
 		}
 		if err := handler(dst, option.Value, path); err != nil {
-			return fieldError(path, err)
+			return fieldError(path, wrapInvalidValue(err))
 		}
 	}
 	return nil
@@ -565,7 +564,7 @@ func indirect(value reflect.Value) (reflect.Value, bool) {
 // checkOptions verifies that a string field holds one of the allowed values.
 func (t fieldTag) checkOptions(value reflect.Value, path string) error {
 	if value.Kind() != reflect.String {
-		return fieldError(path, fmt.Errorf("%w: options= needs a string field, got %s", ErrInvalidTag, value.Type()))
+		return fieldError(path, newError(ErrInvalidTag, fmt.Sprintf("options= needs a string field, got %s", value.Type())))
 	}
 	got := value.String()
 	for _, allowed := range t.Options {
@@ -573,17 +572,17 @@ func (t fieldTag) checkOptions(value reflect.Value, path string) error {
 			return nil
 		}
 	}
-	return fieldError(path, fmt.Errorf("%w: %q is not one of %s", ErrInvalidValue, got, strings.Join(t.Options, ", ")))
+	return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%q is not one of %s", got, strings.Join(t.Options, ", "))))
 }
 
 // checkRange verifies that a numeric field lies inside its range.
 func (t fieldTag) checkRange(value reflect.Value, path string) error {
 	number, ok := numericValue(value)
 	if !ok {
-		return fieldError(path, fmt.Errorf("%w: range= needs a numeric field, got %s", ErrInvalidTag, value.Type()))
+		return fieldError(path, newError(ErrInvalidTag, fmt.Sprintf("range= needs a numeric field, got %s", value.Type())))
 	}
 	if !t.Range.contains(number) {
-		return fieldError(path, fmt.Errorf("%w: %v is outside the range %s", ErrInvalidValue, number, t.Range))
+		return fieldError(path, newError(ErrInvalidValue, fmt.Sprintf("%v is outside the range %s", number, t.Range)))
 	}
 	return nil
 }
@@ -638,14 +637,19 @@ func splitTagValue(raw string, sep rune) ([]string, error) {
 		unclosed rune
 	)
 
-	runes := []rune(raw)
-	for i := 0; i < len(runes); i++ {
-		c := runes[i]
+	// Iterate over the string directly with range, which decodes runes one at
+	// a time without allocating a []rune slice. The index i is the byte offset
+	// of the current rune, and peeking at the next rune is done with a second
+	// range over the remainder.
+	for i := 0; i < len(raw); {
+		c, size := utf8.DecodeRuneInString(raw[i:])
+		i += size
 		switch {
-		case c == '\\' && i+1 < len(runes):
+		case c == '\\' && i < len(raw):
 			// An escaped character is literal, whatever it is.
-			i++
-			current.WriteRune(runes[i])
+			next, nextSize := utf8.DecodeRuneInString(raw[i:])
+			i += nextSize
+			current.WriteRune(next)
 		case c == '"':
 			quoted = !quoted
 		case quoted:
@@ -668,12 +672,10 @@ func splitTagValue(raw string, sep rune) ([]string, error) {
 	}
 
 	if quoted {
-		return nil, fmt.Errorf("unbalanced %s in %q: write the quote as %s to keep it literal",
-			`"`, raw, `\"`)
+		return nil, newError(ErrInvalidTag, fmt.Sprintf("unbalanced quote in %q", raw))
 	}
 	if depth > 0 {
-		return nil, fmt.Errorf("unclosed %q in %q: quote the value to keep a lone bracket literal, "+
-			"e.g. default=\\\"a%cb\\\"", unclosed, raw, unclosed)
+		return nil, newError(ErrInvalidTag, fmt.Sprintf("unclosed %q in %q", unclosed, raw))
 	}
 
 	return append(values, strings.TrimSpace(current.String())), nil

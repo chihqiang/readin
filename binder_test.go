@@ -210,8 +210,9 @@ func TestStructBinderRequired(t *testing.T) {
 	if !errors.Is(err, ErrMissingField) {
 		t.Fatalf("error = %v, want ErrMissingField", err)
 	}
-	if !strings.Contains(err.Error(), "port") {
-		t.Fatalf("error = %v, want the field path", err)
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Field != "port" {
+		t.Fatalf("error = %v, want the field path \"port\"", err)
 	}
 
 	// required is checked after default and env, so a default satisfies it.
@@ -656,10 +657,7 @@ func TestStructBinderReportsAnUnreadableTag(t *testing.T) {
 	target := reflect.New(typ).Interface()
 	err := NewStructBinder().Bind(emptyTree(), target)
 
-	wantFieldError(t, err, ErrInvalidTag, "Path")
-	if !strings.Contains(err.Error(), "quote the option value") {
-		t.Fatalf("error = %v, want it to say how to write the option instead", err)
-	}
+	wantFieldDetail(t, err, ErrInvalidTag, "Path", "quote")
 
 	// The same field without the escape binds normally, so the failure really is
 	// about the tag and not about the shape of the type.
@@ -717,11 +715,19 @@ func TestStructBinderValidatorFailureNamesTheSection(t *testing.T) {
 	if err == nil {
 		t.Fatal("want a failure")
 	}
-	if !strings.Contains(err.Error(), "max must be positive") {
-		t.Fatalf("error = %v, want the validator message", err)
-	}
-	if !strings.Contains(err.Error(), "limit") {
+	// A validator returns its own error (errors.New), which wrapInvalidValue
+	// wraps as *Error with Kind=ErrInvalidValue and the validator's message
+	// in Detail. Both errors.Is(err, ErrInvalidValue) and the field path
+	// are available to the caller.
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Field != "limit" {
 		t.Fatalf("error = %v, want the section the rule belongs to", err)
+	}
+	if !errors.Is(err, ErrInvalidValue) {
+		t.Fatalf("error = %v, want ErrInvalidValue", err)
+	}
+	if !strings.Contains(fe.Detail, "max must be positive") {
+		t.Fatalf("error = %v, want the validator message", err)
 	}
 }
 
@@ -939,7 +945,8 @@ func TestStructBinderTagOptionFailureCarriesThePath(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Bind = %v, want the failure of the handler", err)
 	}
-	if !strings.Contains(err.Error(), "name") {
+	var fe *Error
+	if !errors.As(err, &fe) || fe.Field != "name" {
 		t.Fatalf("error = %v, want the field path", err)
 	}
 }
@@ -1004,9 +1011,7 @@ func TestStructBinderRefusesToRegisterATagOption(t *testing.T) {
 			if !errors.Is(err, ErrInvalidTag) {
 				t.Fatalf("Bind = %v, want ErrInvalidTag", err)
 			}
-			if !strings.Contains(err.Error(), c.want) {
-				t.Fatalf("error = %v, want it to explain the refusal", err)
-			}
+			wantDetail(t, err, ErrInvalidTag, c.want)
 		})
 	}
 
@@ -1017,8 +1022,10 @@ func TestStructBinderRefusesToRegisterATagOption(t *testing.T) {
 		WithBinderTagOption(optRequired, lowerHandler),
 		WithBinderTagOption("", lowerHandler),
 	)
-	if err := binder.Bind(nil, &struct{}{}); !strings.Contains(err.Error(), optRequired) {
-		t.Fatalf("error = %v, want the first refusal", err)
+	if err := binder.Bind(nil, &struct{}{}); err == nil {
+		t.Fatal("Bind = nil, want the first refusal")
+	} else {
+		wantDetail(t, err, ErrInvalidTag, optRequired)
 	}
 }
 
@@ -1030,12 +1037,7 @@ func TestStructBinderWithoutATagOption(t *testing.T) {
 	}
 
 	err := NewStructBinder().Bind(yamlTree(t, "level: INFO\n"), &cfg)
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Fatalf("Bind = %v, want ErrInvalidTag", err)
-	}
-	if !strings.Contains(err.Error(), optCoerce) {
-		t.Fatalf("error = %v, want it to name the unknown option", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, optCoerce)
 	if cfg.Level != "" {
 		t.Fatalf("Level = %q, want nothing to be bound", cfg.Level)
 	}

@@ -3,7 +3,6 @@ package readin
 import (
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -202,12 +201,7 @@ func TestWithTagOption(t *testing.T) {
 	// error: a name readin does not know is a typo until an application says
 	// otherwise.
 	err := New().LoadBytes([]byte("level: INFO\n"), FormatYAML, &cfg)
-	if !errors.Is(err, ErrInvalidTag) {
-		t.Fatalf("LoadBytes = %v, want ErrInvalidTag", err)
-	}
-	if !strings.Contains(err.Error(), optCoerce) {
-		t.Fatalf("error = %v, want it to name the unknown option", err)
-	}
+	wantDetail(t, err, ErrInvalidTag, optCoerce)
 
 	// Like WithTagKey, it is an option of the default binder and is ignored when a
 	// custom Binder is installed: that binder parses its own tags.

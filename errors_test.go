@@ -10,7 +10,7 @@ import (
 
 func TestFieldErrorWithField(t *testing.T) {
 	cause := errors.New("boom")
-	err := &FieldError{Field: "server.port", Err: cause}
+	err := &Error{Kind: cause, Field: "server.port"}
 
 	if got := err.Error(); !strings.Contains(got, `"server.port"`) || !strings.Contains(got, "boom") {
 		t.Fatalf("Error() = %q, want the field and the cause", got)
@@ -28,14 +28,14 @@ func TestFieldErrorWithField(t *testing.T) {
 func TestFieldErrorWithoutField(t *testing.T) {
 	// A FieldError with no path is rendered as the cause alone: that happens for
 	// the root struct, where there is no path to prepend.
-	err := &FieldError{Err: errors.New("boom")}
+	err := &Error{Kind: errors.New("boom")}
 	if got := err.Error(); got != "boom" {
 		t.Fatalf("Error() = %q, want %q", got, "boom")
 	}
 }
 
 func TestFieldErrorWithASentinel(t *testing.T) {
-	err := &FieldError{Field: "port", Err: ErrMissingField}
+	err := &Error{Field: "port", Kind: ErrMissingField}
 	if !errors.Is(err, ErrMissingField) {
 		t.Fatal("errors.Is did not reach the sentinel through the field error")
 	}
@@ -125,14 +125,18 @@ func TestKindOf(t *testing.T) {
 func TestInvalidValue(t *testing.T) {
 	err := invalidValue([]any{1}, reflect.TypeOf(0), "port")
 
-	if !errors.Is(err, ErrInvalidValue) {
-		t.Fatalf("error = %v, want ErrInvalidValue", err)
+	var fe *Error
+	if !errors.As(err, &fe) {
+		t.Fatalf("error = %v, want an *Error", err)
 	}
-	if !strings.Contains(err.Error(), "array") || !strings.Contains(err.Error(), "int") {
-		t.Fatalf("error = %v, want the value shape and the target type", err)
+	if !errors.Is(fe, ErrInvalidValue) {
+		t.Fatalf("Kind = %v, want ErrInvalidValue", fe.Kind)
 	}
-	if !strings.Contains(err.Error(), "port") {
-		t.Fatalf("error = %v, want the field path", err)
+	if fe.Field != "port" {
+		t.Fatalf("Field = %q, want %q", fe.Field, "port")
+	}
+	if !strings.Contains(fe.Detail, "array") || !strings.Contains(fe.Detail, "int") {
+		t.Fatalf("Detail = %q, want the value shape and the target type", fe.Detail)
 	}
 }
 
@@ -177,11 +181,42 @@ func wantFieldError(t *testing.T, err error, sentinel error, path string) {
 		t.Fatalf("error = %v, want it to wrap %v", err, sentinel)
 	}
 
-	var fieldErr *FieldError
+	var fieldErr *Error
 	if !errors.As(err, &fieldErr) {
-		t.Fatalf("error = %v, want a *FieldError", err)
+		t.Fatalf("error = %v, want an *Error", err)
 	}
 	if fieldErr.Field != path {
-		t.Fatalf("FieldError.Field = %q, want %q (error: %v)", fieldErr.Field, path, err)
+		t.Fatalf("Error.Field = %q, want %q (error: %v)", fieldErr.Field, path, err)
 	}
+}
+
+// wantDetail asserts that err wraps sentinel and that its Detail contains every
+// fragment in substrs. It is the structured replacement for
+// strings.Contains(err.Error(), …) on readin's own errors.
+func wantDetail(t *testing.T, err error, sentinel error, substrs ...string) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatalf("want an error wrapping %v, got nil", sentinel)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("error = %v, want it to wrap %v", err, sentinel)
+	}
+	var fe *Error
+	if !errors.As(err, &fe) {
+		t.Fatalf("error = %v, want an *Error", err)
+	}
+	for _, s := range substrs {
+		if !strings.Contains(fe.Detail, s) {
+			t.Fatalf("Error.Detail = %q, want it to contain %q (error: %v)", fe.Detail, s, err)
+		}
+	}
+}
+
+// wantFieldDetail asserts that err wraps sentinel, points at path, and has a
+// Detail containing every fragment in detailSubstrs.
+func wantFieldDetail(t *testing.T, err error, sentinel error, path string, detailSubstrs ...string) {
+	t.Helper()
+	wantFieldError(t, err, sentinel, path)
+	wantDetail(t, err, sentinel, detailSubstrs...)
 }

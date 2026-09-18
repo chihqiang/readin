@@ -123,7 +123,5 @@ func TestFileSourceWithExtensionlessFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("Load = nil error, want a failure: the format cannot be guessed")
 	}
-	if !strings.Contains(err.Error(), "cannot tell the format") {
-		t.Fatalf("error = %v, want the unknown-format wording", err)
-	}
+	wantDetail(t, err, ErrUnsupportedFormat, "cannot tell the format")
 }

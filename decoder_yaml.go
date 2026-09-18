@@ -71,7 +71,7 @@ func (d *YAMLDecoder) Decode(data []byte) (map[string]any, error) {
 
 	tree, ok := normalizeValue(raw).(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("%w: got %s", ErrNotConfigObject, kindOf(raw))
+		return nil, newError(ErrNotConfigObject, fmt.Sprintf("got %s", kindOf(raw)))
 	}
 	return tree, nil
 }

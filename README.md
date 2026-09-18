@@ -440,30 +440,34 @@ configured" never turns into a confusing "0 is outside [1,65535]".
 
 ## Errors
 
-Every failure wraps a sentinel error, and anything that happened on a config field carries its
-dotted path in a `*FieldError`. The path is built from the config keys, so it points at the file
-rather than at the Go field names:
+Every failure wraps a sentinel error, so `errors.Is` works across the board. For structured
+handling that also needs the field path and the detail, use `errors.As` to get a `*readin.Error`:
 
 ```go
 if err := reader.LoadFile("config.yaml", &cfg); err != nil {
-    var fieldErr *readin.FieldError
-    if errors.As(err, &fieldErr) {
-        log.Printf("config field %s: %v", fieldErr.Field, err) // e.g. peers[1].host
-    }
     if errors.Is(err, readin.ErrMissingField) {
-        // ...
+        // a required field was not set
+    }
+    var e *readin.Error
+    if errors.As(err, &e) {
+        log.Printf("field %s: %s", e.Field, e.Detail) // e.g. "server.port" "cannot use array as int"
     }
 }
 ```
 
+A `Validate` method or a tag option handler that returns its own error still reaches the
+caller: `errors.Is` can find both `ErrInvalidValue` (the readin sentinel) and the caller's
+own error, because the cause is preserved in the error chain.
+
 | Sentinel | Reported when |
 | --- | --- |
 | `ErrMissingField` | a `required` field has no value anywhere |
-| `ErrInvalidValue` | a value cannot be used for its field, or a constraint rejected it |
+| `ErrInvalidValue` | a value cannot be used for its field, a constraint rejected it, or `Validate` failed |
 | `ErrInvalidTag` | the struct tag cannot be understood |
 | `ErrDuplicateKey` | two keys are the same key |
 | `ErrUnsupportedFormat` | no decoder claims the format, or it cannot be told from the file name |
 | `ErrNotConfigObject` | the root of the document is not an object |
+| `ErrMissingSection` | a section selected with `WithPrefix` is not in the configuration |
 | `ErrNilSource`, `ErrNilTarget`, `ErrTargetNotStruct` | the argument handed to `Load` is unusable |
 | `ErrNotInitialised` | a value was not built by its constructor: a zero `Reader` or `StructBinder` |
 | `ErrNilDecoder`, `ErrDuplicateDecoder` | a decoder cannot be registered |

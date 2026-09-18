@@ -219,12 +219,12 @@ func (r *Reader) section(tree map[string]any) (map[string]any, error) {
 			return nil, err
 		}
 		if !found || value == nil {
-			return nil, fmt.Errorf("%w: %q", ErrMissingSection, r.prefix)
+			return nil, newError(ErrMissingSection, fmt.Sprintf("%q", r.prefix))
 		}
 
 		nested, ok := value.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("%w: %q is not a section: got %s", ErrMissingSection, r.prefix, kindOf(value))
+			return nil, newError(ErrMissingSection, fmt.Sprintf("%q is not a section: got %s", r.prefix, kindOf(value)))
 		}
 		section = nested
 	}
@@ -234,13 +234,16 @@ func (r *Reader) section(tree map[string]any) (map[string]any, error) {
 // decoder returns the decoder for a format: the extra decoders first (most
 // recent one wins), then the registry.
 func (r *Reader) decoder(format string) (Decoder, error) {
-	for i := len(r.decoders) - 1; i >= 0; i-- {
-		if matchesFormat(r.decoders[i], format) {
-			return r.decoders[i], nil
+	key := normalizeFormat(format)
+	if key != "" {
+		for i := len(r.decoders) - 1; i >= 0; i-- {
+			if decoderMatchesKey(r.decoders[i], key) {
+				return r.decoders[i], nil
+			}
 		}
 	}
 	if r.registry == nil {
-		return nil, fmt.Errorf("%w: no registry configured", ErrUnsupportedFormat)
+		return nil, newError(ErrUnsupportedFormat, "no registry configured")
 	}
 	return r.registry.Lookup(format)
 }
