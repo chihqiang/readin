@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 )
 
 // Sentinel errors returned by readin. Returned errors always wrap one of these
@@ -100,6 +101,17 @@ func joinPath(prefix, key string) string {
 		return key
 	}
 	return prefix + "." + key
+}
+
+// indexPath appends the position of a list item to a field path, e.g.
+// "peers[2]".
+//
+// It runs once per element of every list while the path it builds is only read
+// when an element fails, so it concatenates the index instead of formatting it
+// with fmt.Sprintf: Sprintf costs about twice as much per element and is visible
+// in BenchmarkConverterAssignSlice. A failure still pays for the error it needs.
+func indexPath(path string, i int) string {
+	return path + "[" + strconv.Itoa(i) + "]"
 }
 
 // kindOf describes the shape of a decoded value for error messages, e.g.

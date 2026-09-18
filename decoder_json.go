@@ -21,6 +21,12 @@ func (d *JSONDecoder) Format() string { return FormatJSON }
 // Extensions implements Decoder.
 func (d *JSONDecoder) Extensions() []string { return []string{".json"} }
 
+// canonicalTree implements canonicalDecoder. encoding/json decodes into exactly
+// the canonical types when it is asked for numbers (bool, string, json.Number,
+// []any, map[string]any, nil), so there is nothing to convert and the tree can go
+// to the binder as the parser left it.
+func (d *JSONDecoder) canonicalTree() {}
+
 // Decode implements Decoder.
 func (d *JSONDecoder) Decode(data []byte) (map[string]any, error) {
 	if isBlank(data) {

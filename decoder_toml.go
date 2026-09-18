@@ -46,6 +46,11 @@ func (d *TOMLDecoder) Format() string { return FormatTOML }
 // Extensions implements Decoder.
 func (d *TOMLDecoder) Extensions() []string { return []string{".toml"} }
 
+// canonicalTree implements canonicalDecoder. Decode normalises as part of reading
+// the document: that pass is where a TOML date is rendered back to the text it was
+// written as, using localTimeLayouts for the values that carry no offset.
+func (d *TOMLDecoder) canonicalTree() {}
+
 // Decode implements Decoder.
 func (d *TOMLDecoder) Decode(data []byte) (map[string]any, error) {
 	if isBlank(data) {

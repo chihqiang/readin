@@ -252,6 +252,59 @@ func TestEnvExpanderTree(t *testing.T) {
 	}
 }
 
+func TestEnvExpanderWithoutAReferenceReturnsTheTreeItself(t *testing.T) {
+	// Nothing in this tree can be substituted, so there is no work to do, and
+	// Expand says so by handing the tree back instead of rebuilding an identical
+	// copy of it (see EnvExpander.Expand).
+	expander := NewEnvExpander(WithEnvLookup(envLookup(map[string]string{"A": "x"})))
+
+	tree := map[string]any{
+		"name":   "readin",
+		"nested": map[string]any{"value": "static"},
+		"list":   []any{"a", json.Number("1"), true, nil},
+	}
+
+	expanded, err := expander.Expand(tree)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if !reflect.DeepEqual(expanded, tree) {
+		t.Fatalf("Expand = %#v, want the tree unchanged", expanded)
+	}
+
+	// The result is the input map, which is what makes this the cheap path; a
+	// caller that means to write into the result copies it first.
+	expanded["added"] = true
+	if _, ok := tree["added"]; !ok {
+		t.Fatal("Expand copied the tree: the no-reference path is meant to be a scan and no more")
+	}
+	delete(tree, "added")
+}
+
+func TestEnvExpanderLiteralDollarIsStillScanned(t *testing.T) {
+	// A "$" that is not a reference still sends the tree through the substitution,
+	// because the cheap path only asks whether a "$" is there at all. The result is
+	// the same either way, which is the point: a guess that saved a scan and got a
+	// literal wrong would not be.
+	expander := NewEnvExpander(WithEnvLookup(envLookup(map[string]string{"A": "x"})))
+
+	tree := map[string]any{
+		"price":   "$5.00",
+		"end":     "$",
+		"escaped": "$$A",
+	}
+
+	expanded, err := expander.Expand(tree)
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+
+	want := map[string]any{"price": "$5.00", "end": "$", "escaped": "$A"}
+	if !reflect.DeepEqual(expanded, want) {
+		t.Fatalf("Expand = %#v, want %#v", expanded, want)
+	}
+}
+
 func TestEnvExpanderDoesNotModifyTheInput(t *testing.T) {
 	// The contract says the tree handed in may still be used by the caller, so
 	// expansion has to build a new one instead of rewriting in place.

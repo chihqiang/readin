@@ -47,6 +47,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -338,9 +339,10 @@ func BenchmarkStructBinderBindFlat(b *testing.B) {
 	}
 }
 
-// BenchmarkParseTag measures the per-field tag parsing. There is no cache, so
-// this runs once per exported field per bind; the parallel variant shows how it
-// scales, which is what a shared cache would have to beat.
+// BenchmarkParseTag measures one tag parse, which is what the binder paid per
+// exported field per bind before the tag cache existed. With the cache (see
+// tagCache) a tag is parsed once per binder instead, so this number is the first
+// bind only; BenchmarkTagCacheLookup is the steady state to compare it with.
 func BenchmarkParseTag(b *testing.B) {
 	const raw = `port,required,default=8080,env=APP_PORT,range=[1,65535]`
 
@@ -352,6 +354,8 @@ func BenchmarkParseTag(b *testing.B) {
 	}
 }
 
+// BenchmarkParseTagPlain is the same for a tag with a name and nothing else: it
+// is the floor of the parser, i.e. what the scanner costs on its own.
 func BenchmarkParseTagPlain(b *testing.B) {
 	const raw = `name`
 
@@ -361,6 +365,46 @@ func BenchmarkParseTagPlain(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// BenchmarkTagCacheLookup is the steady state of the tag path: one atomic load
+// and one map read, run for every exported field of every bind (see tagCache).
+// The gap against BenchmarkParseTag is what the cache buys; the parallel variant
+// shows that concurrent loads do not have to serialise on it.
+func BenchmarkTagCacheLookup(b *testing.B) {
+	cache := newTagCache()
+	field := reflect.TypeOf(benchConfig{}).Field(0)
+	tag, err := cache.lookup(field, defaultTagKey)
+	if err != nil {
+		b.Fatalf("lookup: %v", err)
+	}
+	if tag.Name != "name" {
+		b.Fatalf("tag.Name = %q, want the cached field to be the first one", tag.Name)
+	}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := cache.lookup(field, defaultTagKey); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkTagCacheLookupParallel(b *testing.B) {
+	cache := newTagCache()
+	field := reflect.TypeOf(benchConfig{}).Field(0)
+	if _, err := cache.lookup(field, defaultTagKey); err != nil {
+		b.Fatalf("lookup: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if _, err := cache.lookup(field, defaultTagKey); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 func BenchmarkParseRange(b *testing.B) {
@@ -465,9 +509,10 @@ func benchExpandTree(references bool) map[string]any {
 	}
 }
 
-// BenchmarkEnvExpanderExpand compares walking the tree with and without
-// references. Both use the same fixture shape, so the difference is the
-// substitution itself rather than the size of the document.
+// BenchmarkEnvExpanderExpand compares a tree with and without references. Both
+// use the same fixture shape, so the difference is the work itself rather than the
+// size of the document: without a reference Expand only scans for one and hands
+// the tree back, with one it rebuilds the whole tree.
 func BenchmarkEnvExpanderExpandNoReferences(b *testing.B) {
 	expander := NewEnvExpander(WithEnvLookup(envLookup(nil)))
 	tree := benchExpandTree(false)
@@ -529,9 +574,10 @@ func BenchmarkExpandString(b *testing.B) {
 	})
 }
 
-// BenchmarkRegistryLookup measures the RWMutex guarded map lookup that resolves
-// a format on every load. It is also a reminder that the lock is on the read
-// path, which is why the parallel variant matters.
+// BenchmarkRegistryLookup measures resolving a format on every load. The registry
+// publishes its content as an immutable snapshot behind an atomic pointer (see
+// DecoderRegistry), so the read path takes no lock; the parallel variant is there
+// to show that it scales instead of contending.
 func BenchmarkRegistryLookup(b *testing.B) {
 	registry := NewDefaultRegistry()
 

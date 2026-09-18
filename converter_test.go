@@ -218,6 +218,43 @@ func TestConverterAssignStringErrors(t *testing.T) {
 	}
 }
 
+func TestConverterAssignStringToAnInterface(t *testing.T) {
+	converter := testConverter()
+
+	// An `any` field takes the text of an env= or default= option as it is, the
+	// same way it takes any other decoded value that comes from the file.
+	var anything any
+	dst := reflect.ValueOf(&anything).Elem()
+
+	if err := converter.assignString(dst, "from-env", "anything"); err != nil {
+		t.Fatalf("assignString: %v", err)
+	}
+	if anything != "from-env" {
+		t.Fatalf("anything = %#v, want the text", anything)
+	}
+
+	// A pointer to an interface is allocated like any other pointer, and the text
+	// then goes through the same interface rule.
+	pointer := newTarget((*any)(nil))
+	if err := converter.assignString(pointer, "text", "pointer"); err != nil {
+		t.Fatalf("assignString(*any): %v", err)
+	}
+	if got, ok := pointer.Interface().(*any); !ok || got == nil || *got != "text" {
+		t.Fatalf("pointer = %v, want a pointer to %q", pointer.Interface(), "text")
+	}
+
+	// An interface with methods is refused, exactly as it is for a value read
+	// from the file: readin has no way to know which implementation to build.
+	var problem error
+	bindErr := converter.assignString(reflect.ValueOf(&problem).Elem(), "boom", "problem")
+	if !errors.Is(bindErr, ErrInvalidValue) {
+		t.Fatalf("assignString(error) = %v, want ErrInvalidValue", bindErr)
+	}
+	if !strings.Contains(bindErr.Error(), "problem") {
+		t.Fatalf("error = %v, want the field path", bindErr)
+	}
+}
+
 func TestConverterStructGoesThroughTheStructBinder(t *testing.T) {
 	// Nested structs are not filled by copying: they go back to the binder, so
 	// that []Struct and map[string]Struct keep their tags.

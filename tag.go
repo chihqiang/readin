@@ -118,7 +118,8 @@ type tagCacheEntry struct {
 
 // tagCache memoises parsed struct tags, so that a tag is parsed once per binder
 // instead of once per field per bind. For a tag with a few options that is the
-// difference between ~800ns and ~20ns, on every exported field of every load.
+// difference between ~790ns and ~36ns, on every exported field of every load
+// (BenchmarkParseTag against BenchmarkTagCacheLookup).
 //
 // # Why reads take no lock
 //

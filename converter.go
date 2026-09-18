@@ -90,6 +90,10 @@ func (c *converter) assign(dst reflect.Value, src any, path string) error {
 // option. A string is interpreted, because unlike a config file it cannot carry
 // a list: a comma separated string fills a slice field, a duration such as "5s"
 // fills a time.Duration field, and anything else follows the scalar rules.
+//
+// A plain `any` field takes the text itself, exactly as it takes any other
+// decoded value that comes from the file; an interface with methods is refused,
+// because readin cannot know which implementation to build.
 func (c *converter) assignString(dst reflect.Value, raw, path string) error {
 	// The text is a real string, so a type with its own textual form (a custom
 	// scalar, a struct implementing encoding.TextUnmarshaler) gets to parse it.
@@ -105,6 +109,8 @@ func (c *converter) assignString(dst reflect.Value, raw, path string) error {
 			dst.Set(reflect.New(dst.Type().Elem()))
 		}
 		return c.assignString(dst.Elem(), raw, path)
+	case reflect.Interface:
+		return c.assignInterface(dst, raw, path)
 	case reflect.Slice, reflect.Array:
 		if isByteSequence(dst.Type()) {
 			return c.assignBytes(dst, raw, path)
@@ -210,7 +216,7 @@ func (c *converter) assignItems(dst reflect.Value, items []any, path string) err
 				ErrInvalidValue, dst.Type(), dst.Len(), len(items)))
 		}
 		for i, item := range items {
-			if err := c.assign(dst.Index(i), item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+			if err := c.assign(dst.Index(i), item, indexPath(path, i)); err != nil {
 				return err
 			}
 		}
@@ -219,7 +225,7 @@ func (c *converter) assignItems(dst reflect.Value, items []any, path string) err
 
 	slice := reflect.MakeSlice(dst.Type(), len(items), len(items))
 	for i, item := range items {
-		if err := c.assign(slice.Index(i), item, fmt.Sprintf("%s[%d]", path, i)); err != nil {
+		if err := c.assign(slice.Index(i), item, indexPath(path, i)); err != nil {
 			return err
 		}
 	}

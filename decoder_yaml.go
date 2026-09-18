@@ -21,6 +21,12 @@ func (d *YAMLDecoder) Format() string { return FormatYAML }
 // Extensions implements Decoder.
 func (d *YAMLDecoder) Extensions() []string { return []string{".yaml", ".yml"} }
 
+// canonicalTree implements canonicalDecoder. Decode has to normalise the document
+// anyway: that is what turns yaml.v3's own types (a time.Time, an int) into the
+// canonical ones, and what makes the check that the root is an object a check on
+// the tree that is really used.
+func (d *YAMLDecoder) canonicalTree() {}
+
 // Decode implements Decoder.
 //
 // A multi document file is refused rather than half read: yaml.Unmarshal would

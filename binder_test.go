@@ -271,12 +271,14 @@ func TestStructBinderEnvBeatsFileAndDefault(t *testing.T) {
 
 func TestStructBinderEnvValuesAreInterpreted(t *testing.T) {
 	var cfg struct {
-		Hosts []string      `json:"hosts,env=READIN_TEST_HOSTS"`
-		Blob  []byte        `json:"blob,env=READIN_TEST_BLOB"`
-		Debug bool          `json:"debug,env=READIN_TEST_DEBUG"`
-		Port  int           `json:"port,env=READIN_TEST_PORT"`
-		Wait  time.Duration `json:"wait,env=READIN_TEST_WAIT"`
-		Level string        `json:"level,env=READIN_TEST_LEVEL,default=info"`
+		Hosts    []string      `json:"hosts,env=READIN_TEST_HOSTS"`
+		Blob     []byte        `json:"blob,env=READIN_TEST_BLOB"`
+		Debug    bool          `json:"debug,env=READIN_TEST_DEBUG"`
+		Port     int           `json:"port,env=READIN_TEST_PORT"`
+		Wait     time.Duration `json:"wait,env=READIN_TEST_WAIT"`
+		Level    string        `json:"level,env=READIN_TEST_LEVEL,default=info"`
+		Anything any           `json:"anything,env=READIN_TEST_ANY"`
+		Fallback any           `json:"fallback,default=from-default"`
 	}
 
 	lookup := envLookup(map[string]string{
@@ -286,6 +288,7 @@ func TestStructBinderEnvValuesAreInterpreted(t *testing.T) {
 		"READIN_TEST_PORT":  "9090",
 		"READIN_TEST_WAIT":  "1m30s",
 		"READIN_TEST_LEVEL": "warn",
+		"READIN_TEST_ANY":   "from-env",
 	})
 	if err := NewStructBinder(WithBinderEnvLookup(lookup)).Bind(nil, &cfg); err != nil {
 		t.Fatalf("Bind: %v", err)
@@ -308,6 +311,14 @@ func TestStructBinderEnvValuesAreInterpreted(t *testing.T) {
 	}
 	if cfg.Level != "warn" {
 		t.Errorf("Level = %q, want %q", cfg.Level, "warn")
+	}
+	// An `any` field takes the text of the option, from the environment or from a
+	// default: there is no other shape a tag option can produce.
+	if cfg.Anything != "from-env" {
+		t.Errorf("Anything = %#v, want the text from the environment", cfg.Anything)
+	}
+	if cfg.Fallback != "from-default" {
+		t.Errorf("Fallback = %#v, want the text of the default", cfg.Fallback)
 	}
 }
 

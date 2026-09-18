@@ -43,11 +43,21 @@ func NewEnvExpander(opts ...EnvOption) *EnvExpander {
 	return expander
 }
 
-// Expand implements Expander. It returns a new tree; the input is left
-// untouched.
+// Expand implements Expander.
+//
+// A tree that holds no "$" anywhere is returned as it is: there is nothing to
+// substitute, so every key would come back exactly as it is, no expanded key
+// could collide with another key, and a strict expander would have nothing to
+// report. Scanning for the marker costs a fraction of rebuilding every map and
+// every slice of the document, and the copy would be an identical one; see
+// hasReference for what counts as a marker. Every other tree is rebuilt, so the
+// input is left untouched.
 func (e *EnvExpander) Expand(tree map[string]any) (map[string]any, error) {
 	if tree == nil {
 		return emptyTree(), nil
+	}
+	if !hasReference(tree) {
+		return tree, nil
 	}
 	return e.expandMap(tree)
 }
@@ -98,6 +108,34 @@ func (e *EnvExpander) expandValue(value any) (any, error) {
 		// Numbers, booleans, null: nothing to expand.
 		return value, nil
 	}
+}
+
+// hasReference reports whether a node of the tree holds a "$", the one thing
+// that can make expansion change anything. It looks for the marker with the same
+// test ExpandString uses (see expandVariables) rather than with a smarter one, so
+// that it can never answer "nothing to do" for a string that would have been
+// rewritten: "$5" and a trailing "$" are literals, but they are still scanned
+// instead of being special cased and getting wrong.
+func hasReference(value any) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.Contains(v, "$")
+	case map[string]any:
+		for key, item := range v {
+			if strings.Contains(key, "$") || hasReference(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if hasReference(item) {
+				return true
+			}
+		}
+	}
+	// Numbers, booleans and null cannot hold a reference, and a value of any
+	// other type cannot reach the expander: the Reader normalises the tree first.
+	return false
 }
 
 // ExpandString replaces ${VAR} references in s with values from the process

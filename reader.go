@@ -116,7 +116,13 @@ func (r *Reader) Decode(src Source) (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", src.Name(), err)
 	}
-	tree = normalizeTree(tree)
+	// A decoder that already returns the canonical shape is not normalised a
+	// second time: that pass rebuilds every map and every slice of the document,
+	// and the built-in decoders have had to walk the tree anyway. See
+	// canonicalDecoder.
+	if _, canonical := decoder.(canonicalDecoder); !canonical {
+		tree = normalizeTree(tree)
+	}
 
 	if r.expander != nil {
 		if tree, err = r.expander.Expand(tree); err != nil {
