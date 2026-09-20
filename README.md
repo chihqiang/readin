@@ -55,7 +55,8 @@ Expansion is opt-in: without `WithEnvExpansion()` a `${VAR}` reference is kept a
 go get github.com/chihqiang/readin
 ```
 
-Go 1.25 or newer. The only dependencies are `gopkg.in/yaml.v3` and `github.com/BurntSushi/toml`.
+Go 1.22 or newer (uses `Unwrap() []error` from Go 1.20+). The only dependencies are
+`gopkg.in/yaml.v3` and `github.com/BurntSushi/toml`.
 
 ## How it works
 
@@ -434,6 +435,19 @@ func (l Log) Validate() error {
 nested sections first, the root target last. A rule can rely on its own fields, but not on
 anything its parent still has to fill.
 
+A `Validate` failure (or a tag option handler failure) is wrapped as `ErrInvalidValue`, so
+`errors.Is(err, readin.ErrInvalidValue)` catches it. The original error is preserved as the
+cause, so a caller's own sentinel is still reachable:
+
+```go
+var ErrInconsistent = errors.New("config: inconsistent")
+
+func (l Log) Validate() error {
+    // …
+    return ErrInconsistent // errors.Is can find both ErrInvalidValue and ErrInconsistent
+}
+```
+
 Constraints are only applied to values that were really taken from the file, the environment or a
 default. An unset field is reported by `required` — it is not compared against its range, so "not
 configured" never turns into a confusing "0 is outside [1,65535]".
@@ -450,14 +464,39 @@ if err := reader.LoadFile("config.yaml", &cfg); err != nil {
     }
     var e *readin.Error
     if errors.As(err, &e) {
-        log.Printf("field %s: %s", e.Field, e.Detail) // e.g. "server.port" "cannot use array as int"
+        log.Printf("field %s: %s", e.Field, e.Detail)
+        // e.g. "server.port" "cannot use array as int"
     }
 }
 ```
 
+`*readin.Error` has three fields:
+
+| Field | Description |
+| --- | --- |
+| `Kind` | the sentinel this error wraps (e.g. `ErrInvalidValue`); never nil |
+| `Field` | the dotted config path (e.g. `server.port`, `peers[1].host`); empty for non-field failures |
+| `Detail` | a short explanation (e.g. `cannot use array as int`, `0 is outside the range [1,65535]`) |
+
 A `Validate` method or a tag option handler that returns its own error still reaches the
 caller: `errors.Is` can find both `ErrInvalidValue` (the readin sentinel) and the caller's
 own error, because the cause is preserved in the error chain.
+
+```go
+var ErrPortRequired = errors.New("port must be set")
+
+func (s Server) Validate() error {
+    if s.Port == 0 { return ErrPortRequired }
+    return nil
+}
+
+// After LoadFile, both checks pass:
+//   errors.Is(err, readin.ErrInvalidValue)  → true (the readin sentinel)
+//   errors.Is(err, ErrPortRequired)           → true (the caller's own sentinel)
+```
+
+Errors from third-party libraries (YAML/TOML parse failures) and IO errors (`os.ErrNotExist`)
+are wrapped with `%w`, so `errors.Is` still reaches them.
 
 | Sentinel | Reported when |
 | --- | --- |
@@ -567,12 +606,6 @@ go vet ./...                           # static checks
 go test -race -cover ./...             # tests, race detector, coverage
 go test -bench . -benchmem -run '^$'   # benchmarks
 ```
-
-Every source file has a test file of the same name (bar `doc.go`, which holds only the package
-documentation), and the suite covers every statement of the package. Two of them are
-cross-cutting: `concurrency_test.go` runs the pipeline from many goroutines through one shared
-`Reader` (worth running with `-race`), and `benchmark_test.go` measures each stage as well as the
-end-to-end load.
 
 ## License
 
