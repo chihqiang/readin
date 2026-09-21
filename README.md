@@ -1,6 +1,19 @@
-# readin
+<div align="center">
 
-readin: Go config reader. It reads your config and fills your struct, no fuss.
+<h1>readin</h1>
+
+[![Auth](https://img.shields.io/badge/Auth-chihqiang-ff69b4)](https://github.com/chihqiang)
+[![GitHub Pull Requests](https://img.shields.io/github/issues-pr/chihqiang/readin)](https://github.com/chihqiang/readin/pulls)
+[![Release](https://img.shields.io/github/release/chihqiang/readin.svg?style=flat-square)](https://github.com/chihqiang/readin/releases)
+[![GitHub stars](https://img.shields.io/github/stars/chihqiang/readin)](https://github.com/chihqiang/readin/stargazers)
+[![HitCount](https://views.whatilearened.today/views/github/chihqiang/readin.svg)](https://github.com/chihqiang/readin)
+[![GitHub license](https://img.shields.io/github/license/chihqiang/readin)](https://github.com/chihqiang/readin/blob/main/LICENSE)
+
+<p>
+ readin is a small Go configuration reader that reads your config file and fills your struct, no fuss. JSON, YAML and TOML, struct tags for defaults, validation and environment variables, and every stage replaceable.
+</p>
+
+</div>
 
 ## Quick start
 
