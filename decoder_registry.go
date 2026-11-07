@@ -8,20 +8,6 @@ import (
 	"sync/atomic"
 )
 
-// Registry resolves a format name or a file extension to a Decoder.
-//
-// It is an interface so that the set of supported formats is an object that can
-// be injected, decorated or replaced, instead of a package level map that every
-// caller shares. See DecoderRegistry for the default implementation.
-type Registry interface {
-	// Lookup returns the decoder for a format name ("yaml") or a file extension
-	// (".YAML"). It returns an error wrapping ErrUnsupportedFormat when nothing
-	// matches.
-	Lookup(format string) (Decoder, error)
-	// Formats returns the canonical format names, sorted.
-	Formats() []string
-}
-
 // DecoderRegistry is the default Registry: a map from format name and file
 // extension to decoder.
 //

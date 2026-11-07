@@ -575,7 +575,7 @@ func TestStructBinderErrors(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			wantFieldError(t, bindYAML(t, c.content, c.target), c.sentinel, c.path)
+			wantFieldPath(t, bindYAML(t, c.content, c.target), c.sentinel, c.path)
 		})
 	}
 }
@@ -593,13 +593,13 @@ func TestStructBinderEnvValuesAreChecked(t *testing.T) {
 		Port int `json:"port,env=READIN_TEST_PORT"`
 	}
 	err := NewStructBinder(env).Bind(nil, &numeric)
-	wantFieldError(t, err, ErrInvalidValue, "port")
+	wantFieldPath(t, err, ErrInvalidValue, "port")
 
 	var choice struct {
 		Level string `json:"level,env=READIN_TEST_LEVEL,options=debug|info"`
 	}
 	err = NewStructBinder(env).Bind(nil, &choice)
-	wantFieldError(t, err, ErrInvalidValue, "level")
+	wantFieldPath(t, err, ErrInvalidValue, "level")
 }
 
 func TestStructBinderDefaultsAreChecked(t *testing.T) {
@@ -609,20 +609,20 @@ func TestStructBinderDefaultsAreChecked(t *testing.T) {
 		Level string `json:"level,default=trace,options=debug|info"`
 	}
 	err := NewStructBinder().Bind(nil, &choice)
-	wantFieldError(t, err, ErrInvalidValue, "level")
+	wantFieldPath(t, err, ErrInvalidValue, "level")
 
 	var ranged struct {
 		Port int `json:"port,default=70000,range=[1,65535]"`
 	}
 	err = NewStructBinder().Bind(nil, &ranged)
-	wantFieldError(t, err, ErrInvalidValue, "port")
+	wantFieldPath(t, err, ErrInvalidValue, "port")
 
 	// A default that cannot even be converted is reported as well.
 	var unconvertible struct {
 		Port int `json:"port,default=abc"`
 	}
 	err = NewStructBinder().Bind(nil, &unconvertible)
-	wantFieldError(t, err, ErrInvalidValue, "port")
+	wantFieldPath(t, err, ErrInvalidValue, "port")
 }
 
 func TestStructBinderEmbeddedFailureIsReported(t *testing.T) {
@@ -638,7 +638,7 @@ func TestStructBinderEmbeddedFailureIsReported(t *testing.T) {
 
 	var cfg BindOuter
 	err := bindYAML(t, "name: app\n", &cfg)
-	wantFieldError(t, err, ErrMissingField, "port")
+	wantFieldPath(t, err, ErrMissingField, "port")
 }
 
 func TestStructBinderReportsAnUnreadableTag(t *testing.T) {

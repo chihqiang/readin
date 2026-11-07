@@ -6,20 +6,6 @@ import (
 	"strings"
 )
 
-// Binder fills a target struct from a decoded config tree.
-//
-// StructBinder is the default implementation: a reflection based filler that
-// understands the struct tag options documented on fieldTag. Install another one
-// with WithBinder to change how structs are filled, e.g. to fill a
-// map[string]string instead, to resolve values from a secret store, or to
-// decorate the default binder with extra checks.
-type Binder interface {
-	// Bind fills target, which must be a non-nil pointer to a struct, from tree.
-	// A nil tree is treated as an empty one, which is how FillDefault fills
-	// defaults and env= values only.
-	Bind(tree map[string]any, target any) error
-}
-
 // structBinder is the part of a binder the converter needs: filling a decoded
 // object into a struct value. It is how nested structs, []Struct and
 // map[string]Struct fields keep their tags.
