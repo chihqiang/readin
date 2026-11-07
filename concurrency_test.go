@@ -413,9 +413,9 @@ func TestConcurrentFailuresOnOneBinder(t *testing.T) {
 		if i%2 == 0 {
 			cfg := binderConfig{}
 			err := binder.Bind(yamlTree(t, "port: 1\nname: {a: b}\n"), &cfg)
-			var fieldErr *FieldError
+			var fieldErr *Error
 			if !errors.As(err, &fieldErr) || fieldErr.Field != "name" {
-				return fmt.Errorf("error = %v, want a FieldError for name", err)
+				return fmt.Errorf("error = %v, want an Error for name", err)
 			}
 			return nil
 		}
@@ -644,9 +644,9 @@ func TestConcurrentValidator(t *testing.T) {
 	})
 }
 
-// TestConcurrentFieldError decorates errors from many goroutines, so the
+// TestConcurrentFieldPaths decorates errors from many goroutines, so the
 // innermost-path rule is exercised under contention.
-func TestConcurrentFieldError(t *testing.T) {
+func TestConcurrentFieldPaths(t *testing.T) {
 	inner := errors.New("boom")
 
 	concurrently(t, concurrencyGoroutines, func(i int) error {
@@ -654,9 +654,9 @@ func TestConcurrentFieldError(t *testing.T) {
 
 		err := fieldError("peers", fieldError(path, inner))
 
-		var fieldErr *FieldError
+		var fieldErr *Error
 		if !errors.As(err, &fieldErr) {
-			return errors.New("want a FieldError")
+			return errors.New("want an Error")
 		}
 		if fieldErr.Field != path {
 			return fmt.Errorf("Field = %q, want %q", fieldErr.Field, path)

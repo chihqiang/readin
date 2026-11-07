@@ -1,32 +1,15 @@
 package readin
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 
-// Decoder turns raw configuration bytes into a config tree.
-//
-// A config tree is a map[string]any whose values are one of: map[string]any,
-// []any, string, bool, json.Number, nil. Decoders do not have to produce those
-// types themselves: the Reader normalises whatever a decoder returns (see
-// normalize.go), so native library types such as int64, float64, time.Time or
-// map[any]any are fine as well.
-//
-// The decoders of this package return the canonical shape already and say so
-// with canonicalDecoder, so the Reader does not walk their tree a second time.
-type Decoder interface {
-	// Format returns the canonical format name, e.g. "yaml".
-	Format() string
-	// Extensions returns the file extensions this decoder handles, e.g.
-	// []string{".yaml", ".yml"}.
-	Extensions() []string
-	// Decode parses data into a config tree. Empty content decodes into an
-	// empty (non nil) tree, so that a config file holding only comments behaves
-	// like a config file that is not there at all, i.e. defaults apply.
-	//
-	// The content the Reader hands over has no leading byte order mark: an
-	// editor may write one, and it is an encoding artifact rather than part of
-	// the document. See stripBOM.
-	Decode(data []byte) (map[string]any, error)
-}
+	"github.com/BurntSushi/toml"
+	"gopkg.in/yaml.v3"
+)
 
 // canonicalDecoder is a Decoder whose Decode already returns a tree in the
 // canonical shape described on Decoder, so that the Reader skips the
@@ -85,4 +68,182 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 // load the same way whichever format it is written in.
 func stripBOM(content []byte) []byte {
 	return bytes.TrimPrefix(content, utf8BOM)
+}
+
+// JSONDecoder parses JSON. Numbers are kept as json.Number so that large
+// integers and exact decimals survive instead of being rounded through float64.
+type JSONDecoder struct{}
+
+// NewJSONDecoder returns a JSON decoder.
+func NewJSONDecoder() *JSONDecoder { return &JSONDecoder{} }
+
+// Format implements Decoder.
+func (d *JSONDecoder) Format() string { return FormatJSON }
+
+// Extensions implements Decoder.
+func (d *JSONDecoder) Extensions() []string { return []string{".json"} }
+
+// canonicalTree implements canonicalDecoder. encoding/json decodes into exactly
+// the canonical types when it is asked for numbers (bool, string, json.Number,
+// []any, map[string]any, nil), so there is nothing to convert and the tree can go
+// to the binder as the parser left it.
+func (d *JSONDecoder) canonicalTree() {}
+
+// Decode implements Decoder.
+func (d *JSONDecoder) Decode(data []byte) (map[string]any, error) {
+	if isBlank(data) {
+		return emptyTree(), nil
+	}
+
+	var raw any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("readin: parse json: %w", err)
+	}
+
+	// A second document behind the first one is almost always a mistake (a
+	// duplicated file, a forgotten comma), and silently ignoring it would mean
+	// silently ignoring part of the configuration.
+	if _, err := decoder.Token(); err == nil {
+		return nil, fmt.Errorf("readin: parse json: unexpected content after the config document")
+	} else if !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("readin: parse json: unexpected content after the config document: %w", err)
+	}
+
+	tree, ok := raw.(map[string]any)
+	if !ok {
+		return nil, newError(ErrNotConfigObject, fmt.Sprintf("got %s", kindOf(raw)))
+	}
+	return tree, nil
+}
+
+// TOMLDecoder parses TOML. TOML dates and times become strings in the config
+// tree, so a time.Time field can be filled from them like from any other string:
+//
+//	date = 2024-01-02            -> "2024-01-02"
+//	time = 10:30:00              -> "10:30:00"
+//	local = 2024-01-02T10:30:00  -> "2024-01-02T10:30:00"
+//	stamp = 2024-01-02T10:30:00Z -> "2024-01-02T10:30:00Z"
+//
+// A TOML value written without an offset is called local and has no instant: the
+// TOML specification leaves its meaning to the implementation, and the parsing
+// library reads it in the zone of the machine doing the parsing. Keeping the
+// local wall clock is therefore not just the faithful text, it is what makes the
+// same file load the same way on a laptop and in a container.
+type TOMLDecoder struct{}
+
+// localTimeLayouts maps the time zones that mark a TOML value written without an
+// offset onto the layout that renders it back as it was written: a date, a time
+// or a datetime, each with an optional fraction.
+//
+// The zone names are the ones github.com/BurntSushi/toml gives the fixed zones it
+// uses for those values (its internal/tz.go). The library keeps them unexported,
+// so a name is the only handle readin has on "this value has no offset". Their
+// renaming would cost the special case and not correctness: the value would fall
+// back to RFC 3339 with the offset of the parsing machine, which is what it was
+// before this was handled at all.
+var localTimeLayouts = map[string]string{
+	"date-local":     "2006-01-02",
+	"time-local":     "15:04:05.999999999",
+	"datetime-local": "2006-01-02T15:04:05.999999999",
+}
+
+// NewTOMLDecoder returns a TOML decoder.
+func NewTOMLDecoder() *TOMLDecoder { return &TOMLDecoder{} }
+
+// Format implements Decoder.
+func (d *TOMLDecoder) Format() string { return FormatTOML }
+
+// Extensions implements Decoder.
+func (d *TOMLDecoder) Extensions() []string { return []string{".toml"} }
+
+// canonicalTree implements canonicalDecoder. Decode normalises as part of reading
+// the document: that pass is where a TOML date is rendered back to the text it was
+// written as, using localTimeLayouts for the values that carry no offset.
+func (d *TOMLDecoder) canonicalTree() {}
+
+// Decode implements Decoder.
+func (d *TOMLDecoder) Decode(data []byte) (map[string]any, error) {
+	if isBlank(data) {
+		return emptyTree(), nil
+	}
+
+	var raw map[string]any
+	if err := toml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("readin: parse toml: %w", err)
+	}
+
+	// A TOML document is always an object at the top level, so the tree only has
+	// to be normalised; normalizeTree also turns a nil map into an empty tree.
+	// That normalisation is also what turns a TOML date into text, using
+	// localTimeLayouts for the values written without an offset.
+	return normalizeTree(raw), nil
+}
+
+// YAMLDecoder parses YAML, handling both the .yaml and the .yml extension.
+type YAMLDecoder struct{}
+
+// NewYAMLDecoder returns a YAML decoder.
+func NewYAMLDecoder() *YAMLDecoder { return &YAMLDecoder{} }
+
+// Format implements Decoder.
+func (d *YAMLDecoder) Format() string { return FormatYAML }
+
+// Extensions implements Decoder.
+func (d *YAMLDecoder) Extensions() []string { return []string{".yaml", ".yml"} }
+
+// canonicalTree implements canonicalDecoder. Decode has to normalise the document
+// anyway: that is what turns yaml.v3's own types (a time.Time, an int) into the
+// canonical ones, and what makes the check that the root is an object a check on
+// the tree that is really used.
+func (d *YAMLDecoder) canonicalTree() {}
+
+// Decode implements Decoder.
+//
+// A multi document file is refused rather than half read: yaml.Unmarshal would
+// return the first document and silently drop the rest, so a file that was
+// concatenated with another one would look like a configuration that lost a
+// section. Documents that hold nothing are skipped instead, so a "---" marker
+// used as a separator or a template placeholder is still a valid empty config;
+// yaml.v3 cannot tell such a document apart from one holding an explicit
+// "null", which is why a bare "null" also counts as absent.
+func (d *YAMLDecoder) Decode(data []byte) (map[string]any, error) {
+	if isBlank(data) {
+		return emptyTree(), nil
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var (
+		raw   any
+		found bool
+	)
+	for {
+		var document any
+		err := decoder.Decode(&document)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("readin: parse yaml: %w", err)
+		}
+		if document == nil {
+			// An empty document ("---", "null", "~"): another one may follow.
+			continue
+		}
+		if found {
+			return nil, fmt.Errorf("readin: parse yaml: unexpected content after the config document")
+		}
+		raw, found = document, true
+	}
+
+	if !found {
+		return emptyTree(), nil
+	}
+
+	tree, ok := normalizeValue(raw).(map[string]any)
+	if !ok {
+		return nil, newError(ErrNotConfigObject, fmt.Sprintf("got %s", kindOf(raw)))
+	}
+	return tree, nil
 }

@@ -250,7 +250,7 @@ func TestConverterAssignStringToAnInterface(t *testing.T) {
 	// from the file: readin has no way to know which implementation to build.
 	var problem error
 	bindErr := converter.assignString(reflect.ValueOf(&problem).Elem(), "boom", "problem")
-	wantFieldError(t, bindErr, ErrInvalidValue, "problem")
+	wantFieldPath(t, bindErr, ErrInvalidValue, "problem")
 }
 
 func TestConverterStructGoesThroughTheStructBinder(t *testing.T) {
@@ -332,7 +332,7 @@ func TestConverterTextUnmarshalerWinsOverTheKind(t *testing.T) {
 	// A failing UnmarshalText is reported against the field.
 	broken := newTarget(unmarshalerThatFails(""))
 	err := converter.assign(broken, "text", "broken")
-	wantFieldError(t, err, ErrInvalidValue, "broken")
+	wantFieldPath(t, err, ErrInvalidValue, "broken")
 }
 
 // unmarshalerThatFails always refuses the text it is given.
@@ -517,7 +517,7 @@ func TestConverterMapErrorIsStable(t *testing.T) {
 		if err == nil {
 			t.Fatal("want a failure")
 		}
-		wantFieldError(t, err, ErrInvalidValue, "labels.a")
+		wantFieldPath(t, err, ErrInvalidValue, "labels.a")
 	}
 }
 
@@ -1071,7 +1071,7 @@ func TestConverterArrayElementErrorsCarryTheIndex(t *testing.T) {
 		"not a time",
 	}, "pair")
 
-	wantFieldError(t, err, ErrInvalidValue, "pair[1]")
+	wantFieldPath(t, err, ErrInvalidValue, "pair[1]")
 }
 
 func TestConverterParseTextWithACustomStruct(t *testing.T) {
@@ -1107,7 +1107,7 @@ func TestConverterAssignStringToAStructWithItsOwnParser(t *testing.T) {
 		t.Fatalf("dst = %+v, want the parsed value", got)
 	}
 
-	wantFieldError(t, testConverter().assignString(newTarget(unmarshalerStruct{}), "bad", "custom"), ErrInvalidValue, "custom")
+	wantFieldPath(t, testConverter().assignString(newTarget(unmarshalerStruct{}), "bad", "custom"), ErrInvalidValue, "custom")
 }
 
 // jsonStruct asks to parse itself through encoding/json, which is the hook for a

@@ -44,7 +44,7 @@
 //
 // # Errors
 //
-// Errors carry the path of the config field they happened on (see FieldError)
+// Errors carry the path of the config field they happened on (see Error)
 // and wrap the sentinel errors declared in this package, so
 // errors.Is(err, readin.ErrMissingField) answers "what went wrong" without any
 // string matching.

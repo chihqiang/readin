@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestFieldErrorWithField(t *testing.T) {
+func TestErrorWithField(t *testing.T) {
 	cause := errors.New("boom")
 	err := &Error{Kind: cause, Field: "server.port"}
 
@@ -19,29 +19,29 @@ func TestFieldErrorWithField(t *testing.T) {
 		t.Fatal("Unwrap did not expose the cause")
 	}
 
-	var target *FieldError
+	var target *Error
 	if !errors.As(err, &target) || target.Field != "server.port" {
 		t.Fatalf("errors.As = %+v, want the field error itself", target)
 	}
 }
 
-func TestFieldErrorWithoutField(t *testing.T) {
-	// A FieldError with no path is rendered as the cause alone: that happens for
-	// the root struct, where there is no path to prepend.
+func TestErrorWithoutField(t *testing.T) {
+	// An Error with no path is rendered as the cause alone: that happens for the
+	// root struct, where there is no path to prepend.
 	err := &Error{Kind: errors.New("boom")}
 	if got := err.Error(); got != "boom" {
 		t.Fatalf("Error() = %q, want %q", got, "boom")
 	}
 }
 
-func TestFieldErrorWithASentinel(t *testing.T) {
+func TestErrorWithASentinel(t *testing.T) {
 	err := &Error{Field: "port", Kind: ErrMissingField}
 	if !errors.Is(err, ErrMissingField) {
 		t.Fatal("errors.Is did not reach the sentinel through the field error")
 	}
 }
 
-func TestFieldErrorHelper(t *testing.T) {
+func TestErrorHelper(t *testing.T) {
 	// fieldError is a no-op for nil errors and for an empty path.
 	if got := fieldError("port", nil); got != nil {
 		t.Fatalf("fieldError(path, nil) = %v, want nil", got)
@@ -53,24 +53,24 @@ func TestFieldErrorHelper(t *testing.T) {
 	}
 
 	decorated := fieldError("port", cause)
-	var fieldErr *FieldError
+	var fieldErr *Error
 	if !errors.As(decorated, &fieldErr) || fieldErr.Field != "port" {
-		t.Fatalf("fieldError = %v, want a FieldError for port", decorated)
+		t.Fatalf("fieldError = %v, want an Error for port", decorated)
 	}
 }
 
-func TestFieldErrorKeepsTheInnermostPath(t *testing.T) {
+func TestErrorKeepsTheInnermostPath(t *testing.T) {
 	// The path closest to the failure is the one that survives, so a value that
 	// fails inside a list element is not reported as the whole list.
 	inner := fieldError("tags[1]", errors.New("boom"))
 	outer := fieldError("tags", inner)
 
-	var fieldErr *FieldError
+	var fieldErr *Error
 	if !errors.As(outer, &fieldErr) {
-		t.Fatal("want a FieldError")
+		t.Fatal("want an Error")
 	}
 	if fieldErr.Field != "tags[1]" {
-		t.Fatalf("FieldError.Field = %q, want %q", fieldErr.Field, "tags[1]")
+		t.Fatalf("Error.Field = %q, want %q", fieldErr.Field, "tags[1]")
 	}
 }
 
@@ -169,9 +169,9 @@ func TestSentinelsAreDistinct(t *testing.T) {
 	}
 }
 
-// wantFieldError asserts the shape of a failure: it has to wrap sentinel and it
+// wantFieldPath asserts the shape of a failure: it has to wrap sentinel and it
 // has to point at path.
-func wantFieldError(t *testing.T, err error, sentinel error, path string) {
+func wantFieldPath(t *testing.T, err error, sentinel error, path string) {
 	t.Helper()
 
 	if err == nil {
@@ -217,6 +217,6 @@ func wantDetail(t *testing.T, err error, sentinel error, substrs ...string) {
 // Detail containing every fragment in detailSubstrs.
 func wantFieldDetail(t *testing.T, err error, sentinel error, path string, detailSubstrs ...string) {
 	t.Helper()
-	wantFieldError(t, err, sentinel, path)
+	wantFieldPath(t, err, sentinel, path)
 	wantDetail(t, err, sentinel, detailSubstrs...)
 }

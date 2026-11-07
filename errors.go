@@ -127,15 +127,6 @@ func (e *Error) Unwrap() []error {
 	return []error{e.Kind}
 }
 
-// FieldError is the old name for Error, kept so errors.As(&err) calls that were
-// written before Error was introduced keep compiling. It is an alias, not a
-// new type, so the conversion is free.
-//
-// Deprecated: use Error instead. readin now returns *Error (which carries both
-// the field path and the detail); code that does errors.As(err, &target) with a
-// *FieldError still works because *Error has the same field names.
-type FieldError = Error
-
 // newError builds a structured error wrapping sentinel with a detail message.
 // detail is a short phrase; the caller should not include the sentinel text or
 // the field path, because Error.Error adds them.

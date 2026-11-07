@@ -933,7 +933,7 @@ func TestFieldTagApplyWithoutARegisteredHandler(t *testing.T) {
 	tag := fieldTag{Name: "level", Custom: []customTag{{Name: optCoerce, Value: "lower"}}}
 
 	err := tag.apply(tagBytes("INFO"), "level", nil)
-	wantFieldError(t, err, ErrInvalidTag, "level")
+	wantFieldPath(t, err, ErrInvalidTag, "level")
 }
 
 func TestFieldTagApplyWithoutCustomOptions(t *testing.T) {

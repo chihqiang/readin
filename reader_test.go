@@ -636,7 +636,7 @@ func TestWithPrefixKeepsPathsRelativeToTheSection(t *testing.T) {
 	if !errors.Is(err, ErrInvalidValue) {
 		t.Fatalf("LoadBytes = %v, want ErrInvalidValue", err)
 	}
-	if field, ok := err.(*FieldError); !ok || field.Field != "server.port" {
+	if field, ok := err.(*Error); !ok || field.Field != "server.port" {
 		t.Fatalf("error = %v, want the path server.port", err)
 	}
 
